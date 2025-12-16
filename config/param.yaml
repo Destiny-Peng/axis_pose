@@ -1,0 +1,8 @@
+/**:
+  ros__parameters:
+    publish_rate: 1.0
+    frame_id: camera
+    loop: true
+    voxel_leaf_size_: 0.05
+    sor_mean_k_: 15
+    sor_std_mul_: 1.0
