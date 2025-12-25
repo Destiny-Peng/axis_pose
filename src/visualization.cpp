@@ -16,13 +16,13 @@ namespace axispose
     Visualization::Visualization(const rclcpp::NodeOptions &options) : rclcpp::Node("visualization", options)
     {
         this->declare_parameter("mask_topic", std::string("/yolo/mask"));
-        this->declare_parameter("rgb_topic", std::string("/camera/rgb/image_raw"));
+        this->declare_parameter("color_image_topic", std::string("/camera/rgb/image_raw"));
         this->declare_parameter("pose_topic", std::string("/shaft/pose"));
         this->declare_parameter("camera_info_topic", std::string("/camera/camera_info"));
         this->declare_parameter("axis_length", axis_length_);
 
         std::string mask_topic = this->get_parameter("mask_topic").as_string();
-        std::string rgb_topic = this->get_parameter("rgb_topic").as_string();
+        std::string color_image_topic = this->get_parameter("color_image_topic").as_string();
         std::string pose_topic = this->get_parameter("pose_topic").as_string();
         std::string caminfo_topic = this->get_parameter("camera_info_topic").as_string();
         axis_length_ = this->get_parameter("axis_length").as_double();
@@ -30,7 +30,7 @@ namespace axispose
         rclcpp::QoS qos(rclcpp::KeepLast(5));
 
         // Use message_filters subscribers
-        rgb_sub_.subscribe(this, rgb_topic, qos.get_rmw_qos_profile());
+        rgb_sub_.subscribe(this, color_image_topic, qos.get_rmw_qos_profile());
         pose_sub_.subscribe(this, pose_topic, qos.get_rmw_qos_profile());
         caminfo_sub_.subscribe(this, caminfo_topic, qos.get_rmw_qos_profile());
         mask_sub_.subscribe(this, mask_topic, qos.get_rmw_qos_profile());
@@ -40,7 +40,7 @@ namespace axispose
 
         vis_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/shaft/vis_image", 1);
 
-        RCLCPP_INFO(this->get_logger(), "Visualization node started. Subscribed to %s %s %s %s", rgb_topic.c_str(), pose_topic.c_str(), caminfo_topic.c_str(), mask_topic.c_str());
+        RCLCPP_INFO(this->get_logger(), "Visualization node started. Subscribed to %s %s %s %s", color_image_topic.c_str(), pose_topic.c_str(), caminfo_topic.c_str(), mask_topic.c_str());
     }
 
     // project a 3D point (in camera frame) to pixel using intrinsics

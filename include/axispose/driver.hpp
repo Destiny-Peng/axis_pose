@@ -33,6 +33,7 @@ namespace axispose
         std::string depth_dir_;
         std::string camera_info_file_;
         std::string frame_id_;
+
         double publish_rate_;
         bool loop_;
 

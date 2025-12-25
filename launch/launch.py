@@ -20,10 +20,12 @@ def generate_launch_description():
     pkg_directory = os.path.join(pkg_share, '..', '..', '..', '..')
 
     # 默认图片目录在包内 image/rgb 和 image/depth
-    default_rgb = os.path.join(pkg_directory, 'image', 'rgb')
-    default_depth = os.path.join(pkg_directory, 'image', 'depth')
+    default_rgb = os.path.join(pkg_directory, 'image1', 'rgb')
+    default_depth = os.path.join(pkg_directory, 'image1', 'depth')
     default_engine = os.path.join(
-        pkg_directory, 'engine', 'best.engine')
+        pkg_directory, 'engine', 'occlusion.engine')
+    default_statistic = os.path.join(
+        pkg_directory, 'statistics')
 
     # 参数文件
     param_file = os.path.join(pkg_share, 'config', 'param.yaml')
@@ -39,6 +41,8 @@ def generate_launch_description():
         pkg_share, 'config', 'camera_info.yaml'), description='camera_info YAML 文件路径')
     engine_arg = DeclareLaunchArgument(
         'engine', default_value=default_engine, description='engine文件路径')
+    statistic_directory_arg = DeclareLaunchArgument(
+        'statistic_directory', default_value=default_statistic, description='统计信息文件路径')
     # Composable node 描述
     container = ComposableNodeContainer(
         name='axispose_container',
@@ -48,20 +52,9 @@ def generate_launch_description():
         composable_node_descriptions=[
             ComposableNode(
                 package='axispose',
-                plugin='axispose::CameraDriver',
-                name='camera_driver_component',
-                parameters=[param_file, {
-                    'rgb_dir': LaunchConfiguration('rgb_dir'),
-                    'depth_dir': LaunchConfiguration('depth_dir'),
-                    'camera_info_file': LaunchConfiguration('camera_info_file')
-                }],
-                extra_arguments=[{'use_intra_process_comms': True}]
-            ),
-            ComposableNode(
-                package='axispose',
                 plugin='axispose::SegmentNode',
                 name='segment_node_component',
-                parameters=[{
+                parameters=[param_file, {
                     'engine': LaunchConfiguration('engine')
                 }],
                 extra_arguments=[{'use_intra_process_comms': True}]
@@ -70,16 +63,29 @@ def generate_launch_description():
                 package='axispose',
                 plugin='axispose::PoseEstimate',
                 name='pose_estimate_component',
-                parameters=[],
+                parameters=[param_file, {
+                    'statistics_directory_path': LaunchConfiguration('statistic_directory')
+                }],
                 extra_arguments=[{'use_intra_process_comms': True}]
             ),
             ComposableNode(
                 package='axispose',
                 plugin='axispose::Visualization',
                 name='visualization_component',
-                parameters=[],
+                parameters=[param_file],
                 extra_arguments=[{'use_intra_process_comms': True}]
-            )
+            ),
+            # ComposableNode(
+            #     package='axispose',
+            #     plugin='axispose::CameraDriver',
+            #     name='camera_driver_component',
+            #     parameters=[param_file, {
+            #         'rgb_dir': LaunchConfiguration('rgb_dir'),
+            #         'depth_dir': LaunchConfiguration('depth_dir'),
+            #         'camera_info_file': LaunchConfiguration('camera_info_file')
+            #     }],
+            #     extra_arguments=[{'use_intra_process_comms': True}]
+            # ),
         ],
         output='screen'
     )
@@ -89,6 +95,7 @@ def generate_launch_description():
         depth_dir_arg,
         camera_info_arg,
         engine_arg,
+        statistic_directory_arg,
         LogInfo(
             msg=["axispose: starting camera_driver component with params from ", param_file]),
         container

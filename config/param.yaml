@@ -1,8 +1,18 @@
 /**:
   ros__parameters:
-    publish_rate: 1.0
-    frame_id: camera
+    publish_rate: 2.0
+    frame_id: camera_color_optical_frame
     loop: true
-    voxel_leaf_size_: 0.05
-    sor_mean_k_: 15
-    sor_std_mul_: 1.0
+    voxel_leaf_size: 0.025
+    sor_mean_k: 20.0
+    sor_std_mul: 0.5
+    statistics_enabled: false
+    use_sor: true
+    use_sacline: true
+    sacline_distance_threshold: 0.1
+    use_euclidean_cluster: true
+    cluster_mode: 2 # 0: closest to origin, 1: largest cluster, 2: RANSAC line inliers
+    color_image_topic: /camera/color/image_raw
+    depth_image_topic: /camera/aligned_depth_to_color/image_raw
+    camera_info_topic: /camera/color/camera_info
+    mask_topic: /yolo/mask

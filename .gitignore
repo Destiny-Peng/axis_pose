@@ -6,3 +6,6 @@ image/
 *.jpg
 *.jpeg
 *.engine
+*.csv
+statistics/
+engine/

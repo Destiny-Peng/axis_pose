@@ -28,6 +28,9 @@ namespace axispose
         this->declare_parameter<std::string>("frame_id", "camera");
         this->declare_parameter<double>("publish_rate", 10.0);
         this->declare_parameter<bool>("loop", true);
+        this->declare_parameter<std::string>("color_image_topic", "/camera/rgb/image_raw");
+        this->declare_parameter<std::string>("depth_image_topic", "/camera/depth/image_raw");
+        this->declare_parameter<std::string>("camera_info_topic", "/camera/camera_info");
 
         this->get_parameter("rgb_dir", rgb_dir_);
         this->get_parameter("depth_dir", depth_dir_);
@@ -35,16 +38,19 @@ namespace axispose
         this->get_parameter("frame_id", frame_id_);
         this->get_parameter("publish_rate", publish_rate_);
         this->get_parameter("loop", loop_);
+        std::string color_image_topic_ = this->get_parameter("color_image_topic").as_string();
+        std::string depth_image_topic_ = this->get_parameter("depth_image_topic").as_string();
+        std::string camera_info_topic_ = this->get_parameter("camera_info_topic").as_string();
 
         RCLCPP_INFO(this->get_logger(), "CameraDriver: rgb_dir=%s depth_dir=%s camera_info_file=%s rate=%.2f frame_id=%s loop=%s",
                     rgb_dir_.c_str(), depth_dir_.c_str(), camera_info_file_.c_str(), publish_rate_, frame_id_.c_str(), loop_ ? "true" : "false");
 
         // publishers
         rclcpp::QoS qos(rclcpp::KeepLast(5));
-        rgb_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/camera/rgb/image_raw", qos);
-        depth_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/camera/depth/image_raw", qos);
+        rgb_pub_ = this->create_publisher<sensor_msgs::msg::Image>(color_image_topic_, qos);
+        depth_pub_ = this->create_publisher<sensor_msgs::msg::Image>(depth_image_topic_, qos);
         // Use volatile durability (default) for camera_info to allow intra-process communication.
-        caminfo_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>("/camera/camera_info", qos);
+        caminfo_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(camera_info_topic_, qos);
 
         // load camera info via camera_info_manager if available
         if (!camera_info_file_.empty())

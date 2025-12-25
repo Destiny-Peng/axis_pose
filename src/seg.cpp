@@ -11,8 +11,12 @@ namespace axispose
     {
         // 参数：engine 路径
         this->declare_parameter<std::string>("engine", "");
+        this->declare_parameter<std::string>("color_image_topic", "/camera/color/image_raw");
+        this->declare_parameter<std::string>("mask_topic", "/yolo/mask");
 
         std::string engine_path = this->get_parameter("engine").as_string();
+        std::string color_topic = this->get_parameter("color_image_topic").as_string();
+        std::string mask_topic = this->get_parameter("mask_topic").as_string();
 
         if (engine_path.empty())
         {
@@ -25,9 +29,9 @@ namespace axispose
 
         // 订阅 RGB 图像
         sub_ = this->create_subscription<sensor_msgs::msg::Image>(
-            "/camera/rgb/image_raw", rclcpp::QoS(rclcpp::KeepLast(5)).best_effort(), std::bind(&SegmentNode::image_callback, this, _1));
+            color_topic, rclcpp::QoS(rclcpp::KeepLast(5)).reliable(), std::bind(&SegmentNode::image_callback, this, _1));
 
-        pub_ = this->create_publisher<sensor_msgs::msg::Image>("/yolo/mask", 1);
+        pub_ = this->create_publisher<sensor_msgs::msg::Image>(mask_topic, 1);
 
         RCLCPP_INFO(this->get_logger(), "Segment node initialized. Engine: %s", engine_path.c_str());
     }

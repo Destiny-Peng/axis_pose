@@ -21,6 +21,12 @@
 #include <pcl/filters/extract_indices.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/segmentation/extract_clusters.h>
+#include <pcl/sample_consensus/method_types.h>
+#include <pcl/sample_consensus/model_types.h>
+#include <pcl/segmentation/sac_segmentation.h>
+#include <pcl/ModelCoefficients.h>
+
+#include "axispose/logger.hpp"
 
 #include <memory>
 
@@ -58,6 +64,23 @@ namespace axispose
         double voxel_leaf_size_ = 0.05; // meters
         double sor_mean_k_ = 50;
         double sor_std_mul_ = 1.0;
+        // Statistics collector (instance-based), created in constructor
+        std::string statistics_directory_path_;
+        std::shared_ptr<PointDistanceLogger> distance_recorder_;
+        std::string distance_file_name = "pose_point_to_line.csv";
+        std::shared_ptr<PointDistanceLogger> distance_recorder_1;
+        std::string distance_file_name_1 = "pose_point_to_line_sac.csv";
+        std::shared_ptr<PointNumberLogger> point_number_logger_;
+        std::string pointnumber_file_name = "point_numbers.csv";
+        std::shared_ptr<SimpleTimingLogger> timing_logger_;
+        std::string timing_file_name = "timing.csv";
+        pcl::ModelCoefficients::Ptr coefficients = std::make_shared<pcl::ModelCoefficients>();
+        bool statistics_enabled_ = true;
+        bool use_sor_ = true;
+        bool use_sacline_ = true;
+        bool use_euclidean_cluster_ = true;
+        int cluster_mode_ = 0;                     // 0: closest to origin, 1: largest cluster, 2: RANSAC line inliers
+        double sacline_distance_threshold_ = 0.05; // meters
 
         // Callbacks
         void cameraInfoCallback(const CameraInfo::SharedPtr msg);
@@ -67,6 +90,7 @@ namespace axispose
         pcl::PointCloud<pcl::PointXYZ>::Ptr depthMaskToPointCloud(const cv::Mat &depth);
         void denoisePointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud);
         geometry_msgs::msg::PoseStamped computePoseFromCloud(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const rclcpp::Time &stamp);
+        geometry_msgs::msg::PoseStamped computePoseFromSACLine(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const rclcpp::Time &stamp);
     };
 
 } // namespace axispose
