@@ -24,70 +24,129 @@ namespace axispose
         // parameters
         this->declare_parameter<std::string>("rgb_dir", "");
         this->declare_parameter<std::string>("depth_dir", "");
-        this->declare_parameter<std::string>("camera_info_file", "");
+        this->declare_parameter<std::string>("color_camera_info_file", "");
+        this->declare_parameter<std::string>("depth_camera_info_file", "");
         this->declare_parameter<std::string>("frame_id", "camera");
         this->declare_parameter<double>("publish_rate", 10.0);
         this->declare_parameter<bool>("loop", true);
         this->declare_parameter<std::string>("color_image_topic", "/camera/rgb/image_raw");
         this->declare_parameter<std::string>("depth_image_topic", "/camera/depth/image_raw");
-        this->declare_parameter<std::string>("camera_info_topic", "/camera/camera_info");
+        this->declare_parameter<std::string>("color_camera_info_topic", "/camera/color/camera_info");
+        this->declare_parameter<std::string>("depth_camera_info_topic", "/camera/depth/camera_info");
+        this->declare_parameter<std::string>("camera_name", "camera");
 
         this->get_parameter("rgb_dir", rgb_dir_);
         this->get_parameter("depth_dir", depth_dir_);
-        this->get_parameter("camera_info_file", camera_info_file_);
+        this->get_parameter("color_camera_info_file", color_camera_info_file_);
+        this->get_parameter("depth_camera_info_file", depth_camera_info_file_);
         this->get_parameter("frame_id", frame_id_);
         this->get_parameter("publish_rate", publish_rate_);
         this->get_parameter("loop", loop_);
+        this->get_parameter("camera_name", camera_name_);
         std::string color_image_topic_ = this->get_parameter("color_image_topic").as_string();
         std::string depth_image_topic_ = this->get_parameter("depth_image_topic").as_string();
-        std::string camera_info_topic_ = this->get_parameter("camera_info_topic").as_string();
+        std::string color_camera_info_topic_ = this->get_parameter("color_camera_info_topic").as_string();
+        std::string depth_camera_info_topic_ = this->get_parameter("depth_camera_info_topic").as_string();
 
-        RCLCPP_INFO(this->get_logger(), "CameraDriver: rgb_dir=%s depth_dir=%s camera_info_file=%s rate=%.2f frame_id=%s loop=%s",
-                    rgb_dir_.c_str(), depth_dir_.c_str(), camera_info_file_.c_str(), publish_rate_, frame_id_.c_str(), loop_ ? "true" : "false");
+        RCLCPP_INFO(this->get_logger(), "CameraDriver: rgb_dir=%s depth_dir=%s color_camera_info_file=%s depth_camera_info_file=%s rate=%.2f frame_id=%s loop=%s",
+                    rgb_dir_.c_str(), depth_dir_.c_str(), color_camera_info_file_.c_str(), depth_camera_info_file_.c_str(), publish_rate_, frame_id_.c_str(), loop_ ? "true" : "false");
 
         // publishers
         rclcpp::QoS qos(rclcpp::KeepLast(5));
         rgb_pub_ = this->create_publisher<sensor_msgs::msg::Image>(color_image_topic_, qos);
         depth_pub_ = this->create_publisher<sensor_msgs::msg::Image>(depth_image_topic_, qos);
-        // Use volatile durability (default) for camera_info to allow intra-process communication.
-        caminfo_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(camera_info_topic_, qos);
+        // camera_info should be latched for late subscribers: use transient_local QoS
+        rclcpp::QoS caminfo_qos = rclcpp::QoS(rclcpp::KeepLast(1)).transient_local();
+        color_caminfo_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(color_camera_info_topic_, caminfo_qos);
+        depth_caminfo_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(depth_camera_info_topic_, caminfo_qos);
 
         // load camera info via camera_info_manager if available
-        if (!camera_info_file_.empty())
+        if (!color_camera_info_file_.empty())
         {
             try
             {
-                camera_info_manager_ = std::make_shared<camera_info_manager::CameraInfoManager>(this, "camera");
-                std::string url = camera_info_file_;
+                color_camera_info_manager_ = std::make_shared<camera_info_manager::CameraInfoManager>(this, camera_name_ + "_color");
+                std::string url = color_camera_info_file_;
                 // if local path, convert to file:// URL if necessary
                 if (url.rfind("file:", 0) != 0 && url.rfind("package:", 0) != 0)
                 {
                     url = std::string("file://") + url;
                 }
-                if (camera_info_manager_->validateURL(url))
+                if (color_camera_info_manager_->validateURL(url))
                 {
-                    camera_info_manager_->loadCameraInfo(url);
-                    camera_info_msg_ = camera_info_manager_->getCameraInfo();
+                    color_camera_info_manager_->loadCameraInfo(url);
+                    color_camera_info_msg_ = color_camera_info_manager_->getCameraInfo();
                 }
                 else
                 {
-                    RCLCPP_WARN(this->get_logger(), "camera_info_manager could not validate URL %s, falling back to parser", url.c_str());
-                    if (!load_camera_info_from_file(camera_info_file_, camera_info_msg_))
+                    RCLCPP_WARN(this->get_logger(), "color_camera_info_manager could not validate URL %s, falling back to parser", url.c_str());
+                    if (!load_camera_info_from_file(color_camera_info_file_, color_camera_info_msg_))
                     {
-                        RCLCPP_WARN(this->get_logger(), "failed to load camera_info from %s", camera_info_file_.c_str());
+                        RCLCPP_WARN(this->get_logger(), "failed to load color_camera_info from %s", color_camera_info_file_.c_str());
                     }
                 }
             }
             catch (const std::exception &e)
             {
-                RCLCPP_WARN(this->get_logger(), "camera_info_manager exception: %s, falling back to parser", e.what());
-                if (!load_camera_info_from_file(camera_info_file_, camera_info_msg_))
+                RCLCPP_WARN(this->get_logger(), "color_camera_info_manager exception: %s, falling back to parser", e.what());
+                if (!load_camera_info_from_file(color_camera_info_file_, color_camera_info_msg_))
                 {
-                    RCLCPP_WARN(this->get_logger(), "failed to load camera_info from %s", camera_info_file_.c_str());
+                    RCLCPP_WARN(this->get_logger(), "failed to load color_camera_info from %s", color_camera_info_file_.c_str());
                 }
             }
         }
-        camera_info_msg_.header.frame_id = frame_id_;
+        // set camera_info frame_ids for color/depth derived from base frame_id_
+        color_camera_info_msg_.header.frame_id = frame_id_ + std::string("_color");
+
+        // load depth camera info via camera_info_manager if available
+        if (!depth_camera_info_file_.empty())
+        {
+            try
+            {
+                auto depth_camera_info_manager = std::make_shared<camera_info_manager::CameraInfoManager>(this, camera_name_ + "_depth");
+                std::string url = depth_camera_info_file_;
+                if (url.rfind("file:", 0) != 0 && url.rfind("package:", 0) != 0)
+                {
+                    url = std::string("file://") + url;
+                }
+                if (depth_camera_info_manager->validateURL(url))
+                {
+                    depth_camera_info_manager->loadCameraInfo(url);
+                    depth_camera_info_msg_ = depth_camera_info_manager->getCameraInfo();
+                }
+                else
+                {
+                    RCLCPP_WARN(this->get_logger(), "depth_camera_info_manager could not validate URL %s, falling back to parser", url.c_str());
+                    if (!load_camera_info_from_file(depth_camera_info_file_, depth_camera_info_msg_))
+                    {
+                        RCLCPP_WARN(this->get_logger(), "failed to load depth_camera_info from %s", depth_camera_info_file_.c_str());
+                    }
+                }
+            }
+            catch (const std::exception &e)
+            {
+                RCLCPP_WARN(this->get_logger(), "depth_camera_info_manager exception: %s, falling back to parser", e.what());
+                if (!load_camera_info_from_file(depth_camera_info_file_, depth_camera_info_msg_))
+                {
+                    RCLCPP_WARN(this->get_logger(), "failed to load depth_camera_info from %s", depth_camera_info_file_.c_str());
+                }
+            }
+        }
+        // ensure depth camera_info frame_id is set
+        depth_camera_info_msg_.header.frame_id = frame_id_ + std::string("_depth");
+
+        // Publish camera_info immediately (latched) so late subscribers receive them
+        rclcpp::Time now = this->now();
+        if (color_caminfo_pub_)
+        {
+            color_camera_info_msg_.header.stamp = now;
+            color_caminfo_pub_->publish(color_camera_info_msg_);
+        }
+        if (depth_caminfo_pub_)
+        {
+            depth_camera_info_msg_.header.stamp = now;
+            depth_caminfo_pub_->publish(depth_camera_info_msg_);
+        }
 
         // load image lists
         load_image_lists();
@@ -95,9 +154,9 @@ namespace axispose
         // preload images into messages
         preload_images();
 
-        // timer
+        // timer for images
         auto period = std::chrono::duration<double>(1.0 / std::max(0.001, publish_rate_));
-        timer_ = this->create_wall_timer(std::chrono::duration_cast<std::chrono::nanoseconds>(period), std::bind(&CameraDriver::publish_timer_callback, this));
+        image_timer_ = this->create_wall_timer(std::chrono::duration_cast<std::chrono::nanoseconds>(period), std::bind(&CameraDriver::publish_timer_callback, this));
         param_subscriber_ = std::make_shared<rclcpp::ParameterEventHandler>(this);
         // parameter callback to allow runtime publish_rate change
         auto publish_rate_callback = [this](const rclcpp::Parameter &p)
@@ -107,10 +166,10 @@ namespace axispose
                 double new_rate = p.as_double();
                 publish_rate_ = new_rate;
                 // rebuild timer
-                if (timer_)
-                    timer_->cancel();
+                if (image_timer_)
+                    image_timer_->cancel();
                 auto period = std::chrono::duration<double>(1.0 / std::max(0.001, publish_rate_));
-                timer_ = this->create_wall_timer(std::chrono::duration_cast<std::chrono::nanoseconds>(period), std::bind(&CameraDriver::publish_timer_callback, this));
+                image_timer_ = this->create_wall_timer(std::chrono::duration_cast<std::chrono::nanoseconds>(period), std::bind(&CameraDriver::publish_timer_callback, this));
                 RCLCPP_INFO(this->get_logger(), "Timer updated to %.2f Hz", publish_rate_);
             }
         };
@@ -126,7 +185,8 @@ namespace axispose
         auto mat_to_msg = [this](const cv::Mat &mat, const std::string &encoding) -> sensor_msgs::msg::Image::SharedPtr
         {
             std_msgs::msg::Header h;
-            h.frame_id = frame_id_;
+            // don't set frame_id here; set it explicitly depending on color/depth when pushing
+            h.frame_id = std::string();
             h.stamp = this->now();
             auto msg = std::make_shared<sensor_msgs::msg::Image>();
             cv_bridge::CvImage cv_img(h, encoding, mat);
@@ -145,6 +205,8 @@ namespace axispose
             }
             cv::cvtColor(img, img, cv::COLOR_BGR2RGB);
             rgb_msgs_.push_back(mat_to_msg(img, sensor_msgs::image_encodings::RGB8));
+            // set color-specific frame_id
+            rgb_msgs_.back()->header.frame_id = frame_id_ + std::string("_color");
         }
 
         // preload depth
@@ -165,6 +227,8 @@ namespace axispose
             }
 
             depth_msgs_.push_back(mat_to_msg(dimg, sensor_msgs::image_encodings::TYPE_16UC1));
+            // set depth-specific frame_id
+            depth_msgs_.back()->header.frame_id = frame_id_ + std::string("_depth");
         }
     }
     void CameraDriver::load_image_lists()
@@ -348,7 +412,8 @@ namespace axispose
                 index_ = 0;
             else
             {
-                timer_->cancel();
+                if (image_timer_)
+                    image_timer_->cancel();
                 RCLCPP_INFO(this->get_logger(), "Finished publishing images");
                 return;
             }
@@ -362,11 +427,11 @@ namespace axispose
             size_t idx = index_ % max_idx;
             // update headers in-place and publish shared_ptr -> zero-copy
             rgb_msgs_[idx]->header.stamp = now;
-            rgb_msgs_[idx]->header.frame_id = frame_id_;
+            rgb_msgs_[idx]->header.frame_id = frame_id_ + std::string("_color");
             rgb_pub_->publish(*rgb_msgs_[idx]);
 
             depth_msgs_[idx]->header.stamp = now;
-            depth_msgs_[idx]->header.frame_id = frame_id_;
+            depth_msgs_[idx]->header.frame_id = frame_id_ + std::string("_depth");
             depth_pub_->publish(*depth_msgs_[idx]);
             RCLCPP_INFO(this->get_logger(), "Published preloaded rgb/depth image %s,%s", rgb_files_[idx].c_str(), depth_files_[idx].c_str());
         }
@@ -384,7 +449,7 @@ namespace axispose
                     cv::cvtColor(img, img, cv::COLOR_BGR2RGB);
                     std_msgs::msg::Header h;
                     h.stamp = now;
-                    h.frame_id = frame_id_;
+                    h.frame_id = frame_id_ + std::string("_color");
                     auto cv_img = cv_bridge::CvImage(h, sensor_msgs::image_encodings::RGB8, img);
                     rgb_pub_->publish(*cv_img.toImageMsg());
                 }
@@ -406,7 +471,7 @@ namespace axispose
                     dimg.convertTo(depth_f, CV_32F);
                     std_msgs::msg::Header h;
                     h.stamp = now;
-                    h.frame_id = frame_id_;
+                    h.frame_id = frame_id_ + std::string("_depth");
                     auto cv_img = cv_bridge::CvImage(h, sensor_msgs::image_encodings::TYPE_32FC1, depth_f);
                     depth_pub_->publish(*cv_img.toImageMsg());
                 }
@@ -415,13 +480,6 @@ namespace axispose
                     RCLCPP_WARN(this->get_logger(), "failed to read depth image: %s", depth_file.c_str());
                 }
             }
-        }
-
-        // publish camera info
-        if (caminfo_pub_)
-        {
-            camera_info_msg_.header.stamp = now;
-            caminfo_pub_->publish(camera_info_msg_);
         }
 
         ++index_;

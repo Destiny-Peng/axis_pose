@@ -18,7 +18,7 @@ namespace axispose
         this->declare_parameter("mask_topic", std::string("/yolo/mask"));
         this->declare_parameter("color_image_topic", std::string("/camera/rgb/image_raw"));
         this->declare_parameter("pose_topic", std::string("/shaft/pose"));
-        this->declare_parameter("camera_info_topic", std::string("/camera/camera_info"));
+        this->declare_parameter("camera_info_topic", std::string("/camera/color/camera_info"));
         this->declare_parameter("axis_length", axis_length_);
 
         std::string mask_topic = this->get_parameter("mask_topic").as_string();
@@ -32,6 +32,7 @@ namespace axispose
         // Use message_filters subscribers
         rgb_sub_.subscribe(this, color_image_topic, qos.get_rmw_qos_profile());
         pose_sub_.subscribe(this, pose_topic, qos.get_rmw_qos_profile());
+        // subscribe to color camera_info (used for projecting into color image)
         caminfo_sub_.subscribe(this, caminfo_topic, qos.get_rmw_qos_profile());
         mask_sub_.subscribe(this, mask_topic, qos.get_rmw_qos_profile());
 

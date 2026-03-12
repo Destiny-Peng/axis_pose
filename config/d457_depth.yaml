@@ -1,0 +1,64 @@
+image_width: 640
+image_height: 480
+camera_name: d457_depth
+camera_matrix:
+  rows: 3
+  cols: 3
+  data:
+    [
+      394.5931396484375,
+      0.0,
+      321.036376953125,
+      0.0,
+      394.5931396484375,
+      240.92140197753906,
+      0.0,
+      0.0,
+      1.0,
+    ]
+distortion_model: plumb_bob
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [0.0, 0.0, 0.0, 0.0, 0.0]
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data:
+    [
+      1.000000,
+      0.000000,
+      0.000000,
+      0.000000,
+      1.000000,
+      0.000000,
+      0.000000,
+      0.000000,
+      1.000000,
+    ]
+projection_matrix:
+  rows: 3
+  cols: 4
+  data:
+    [
+      394.5931396484375,
+      0.0,
+      321.036376953125,
+      0.0,
+      0.0,
+      394.5931396484375,
+      240.92140197753906,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+    ]
+binning_x: 0
+binning_y: 0
+roi:
+  x_offset: 0
+  y_offset: 0
+  height: 0
+  width: 0
+  do_rectify: false

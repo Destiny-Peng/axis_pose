@@ -20,8 +20,8 @@ def generate_launch_description():
     pkg_directory = os.path.join(pkg_share, '..', '..', '..', '..')
 
     # 默认图片目录在包内 image/rgb 和 image/depth
-    default_rgb = os.path.join(pkg_directory, 'image1', 'rgb')
-    default_depth = os.path.join(pkg_directory, 'image1', 'depth')
+    default_rgb = os.path.join(pkg_directory, 'image11', 'rgb')
+    default_depth = os.path.join(pkg_directory, 'image11', 'depth')
     default_engine = os.path.join(
         pkg_directory, 'engine', 'occlusion.engine')
     default_statistic = os.path.join(
@@ -37,8 +37,10 @@ def generate_launch_description():
         'rgb_dir', default_value=default_rgb, description='路径到 RGB 图像目录')
     depth_dir_arg = DeclareLaunchArgument(
         'depth_dir', default_value=default_depth, description='路径到 深度 图像目录')
-    camera_info_arg = DeclareLaunchArgument('camera_info_file', default_value=os.path.join(
-        pkg_share, 'config', 'camera_info.yaml'), description='camera_info YAML 文件路径')
+    color_camera_info_arg = DeclareLaunchArgument('color_camera_info_file', default_value=os.path.join(
+        pkg_share, 'config', 'd555_color.yaml'), description='color camera_info YAML 文件路径')
+    depth_camera_info_arg = DeclareLaunchArgument('depth_camera_info_file', default_value=os.path.join(
+        pkg_share, 'config', 'd555_depth.yaml'), description='depth camera_info YAML 文件路径')
     engine_arg = DeclareLaunchArgument(
         'engine', default_value=default_engine, description='engine文件路径')
     statistic_directory_arg = DeclareLaunchArgument(
@@ -75,17 +77,18 @@ def generate_launch_description():
                 parameters=[param_file],
                 extra_arguments=[{'use_intra_process_comms': True}]
             ),
-            # ComposableNode(
-            #     package='axispose',
-            #     plugin='axispose::CameraDriver',
-            #     name='camera_driver_component',
-            #     parameters=[param_file, {
-            #         'rgb_dir': LaunchConfiguration('rgb_dir'),
-            #         'depth_dir': LaunchConfiguration('depth_dir'),
-            #         'camera_info_file': LaunchConfiguration('camera_info_file')
-            #     }],
-            #     extra_arguments=[{'use_intra_process_comms': True}]
-            # ),
+            ComposableNode(
+                package='axispose',
+                plugin='axispose::CameraDriver',
+                name='camera_driver_component',
+                parameters=[param_file, {
+                    'rgb_dir': LaunchConfiguration('rgb_dir'),
+                    'depth_dir': LaunchConfiguration('depth_dir'),
+                    'color_camera_info_file': LaunchConfiguration('color_camera_info_file'),
+                    'depth_camera_info_file': LaunchConfiguration('depth_camera_info_file')
+                }],
+                extra_arguments=[{'use_intra_process_comms': True}]
+            ),
         ],
         output='screen'
     )
@@ -93,7 +96,8 @@ def generate_launch_description():
     return LaunchDescription([
         rgb_dir_arg,
         depth_dir_arg,
-        camera_info_arg,
+        color_camera_info_arg,
+        depth_camera_info_arg,
         engine_arg,
         statistic_directory_arg,
         LogInfo(

@@ -48,7 +48,8 @@ namespace axispose
         message_filters::Subscriber<Image> mask_sub_;
         std::shared_ptr<message_filters::Synchronizer<ApproxSyncPolicy>> sync_;
 
-        rclcpp::Subscription<CameraInfo>::SharedPtr camera_info_sub_;
+        rclcpp::Subscription<CameraInfo>::SharedPtr camera_info_color_sub_;
+        rclcpp::Subscription<CameraInfo>::SharedPtr camera_info_depth_sub_;
 
         // Publishers
         rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
@@ -56,7 +57,12 @@ namespace axispose
 
         // Intrinsics
         std::atomic<bool> have_intrinsics_{false};
+        // depth intrinsics (used for point cloud conversion)
+        std::atomic<bool> have_intrinsics_depth_{false};
         double fx_{0.0}, fy_{0.0}, cx_{0.0}, cy_{0.0};
+        // color intrinsics (used for alignment)
+        std::atomic<bool> have_intrinsics_color_{false};
+        double color_fx_{0.0}, color_fy_{0.0}, color_cx_{0.0}, color_cy_{0.0};
         double scale_x{1.0}, scale_y{1.0};
         std::string frame_id_ = "base_link";
 
@@ -83,11 +89,14 @@ namespace axispose
         double sacline_distance_threshold_ = 0.05; // meters
 
         // Callbacks
-        void cameraInfoCallback(const CameraInfo::SharedPtr msg);
+        void cameraInfoDepthCallback(const CameraInfo::SharedPtr msg);
+        void cameraInfoColorCallback(const CameraInfo::SharedPtr msg);
         void syncCallback(const Image::ConstSharedPtr depth_msg, const Image::ConstSharedPtr mask_msg);
 
         // Helpers
         pcl::PointCloud<pcl::PointXYZ>::Ptr depthMaskToPointCloud(const cv::Mat &depth);
+        // align depth image to color image size using intrinsics
+        cv::Mat alignDepthToColor(const cv::Mat &depth, int color_width, int color_height);
         void denoisePointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud);
         geometry_msgs::msg::PoseStamped computePoseFromCloud(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const rclcpp::Time &stamp);
         geometry_msgs::msg::PoseStamped computePoseFromSACLine(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const rclcpp::Time &stamp);

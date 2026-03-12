@@ -1,0 +1,71 @@
+image_width: 1280
+image_height: 720
+camera_name: d555_color
+camera_matrix:
+  rows: 3
+  cols: 3
+  data:
+    [
+      644.0340576171875,
+      0.0,
+      630.1362915039062,
+      0.0,
+      643.4035034179688,
+      358.17181396484375,
+      0.0,
+      0.0,
+      1.0,
+    ]
+distortion_model: plumb_bob
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data:
+    [
+      -0.05408380180597305,
+      0.06171799078583717,
+      0.0006096700089983642,
+      0.0009281800012104213,
+      -0.01877106912434101,
+    ]
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data:
+    [
+      1.000000,
+      0.000000,
+      0.000000,
+      0.000000,
+      1.000000,
+      0.000000,
+      0.000000,
+      0.000000,
+      1.000000,
+    ]
+projection_matrix:
+  rows: 3
+  cols: 4
+  data:
+    [
+      644.0340576171875,
+      0.0,
+      630.1362915039062,
+      0.0,
+      0.0,
+      643.4035034179688,
+      358.17181396484375,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+    ]
+binning_x: 0
+binning_y: 0
+roi:
+  x_offset: 0
+  y_offset: 0
+  height: 0
+  width: 0
+  do_rectify: false
