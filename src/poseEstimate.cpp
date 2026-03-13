@@ -1,4 +1,5 @@
 #include "axispose/poseEstimate.hpp"
+#include "axispose/debug_manager.hpp"
 
 #include <pcl/common/centroid.h>
 #include <pcl/common/eigen.h>
@@ -67,6 +68,13 @@ namespace axispose
         pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/shaft/pose", 10);
         debug_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/shaft/debug_cloud", 1);
 
+        // initialize debug manager (controls runtime debug flags via parameter `debug_flags`)
+        debug_ = std::make_shared<DebugManager>(this);
+
+        // initialize helpers
+        pc_processor_ = std::make_unique<PointCloudProcessor>();
+        depth_aligner_ = std::make_unique<DepthAligner>();
+
         // initialize statistics collector instance
         if (statistics_enabled_)
         {
@@ -90,6 +98,10 @@ namespace axispose
             have_intrinsics_depth_ = true;
             have_intrinsics_ = true; // still allow processing when depth intrinsics ready
             RCLCPP_INFO(this->get_logger(), "Got depth camera intrinsics fx=%.2f fy=%.2f cx=%.2f cy=%.2f frame=%s", fx_, fy_, cx_, cy_, frame_id_.c_str());
+            if (depth_aligner_)
+            {
+                depth_aligner_->setDepthIntrinsics(fx_, fy_, cx_, cy_);
+            }
         }
     }
 
@@ -103,6 +115,10 @@ namespace axispose
             color_cy_ = msg->k[5];
             have_intrinsics_color_ = true;
             RCLCPP_INFO(this->get_logger(), "Got color camera intrinsics fx=%.2f fy=%.2f cx=%.2f cy=%.2f frame=%s", color_fx_, color_fy_, color_cx_, color_cy_, msg->header.frame_id.c_str());
+            if (depth_aligner_)
+            {
+                depth_aligner_->setColorIntrinsics(color_fx_, color_fy_, color_cx_, color_cy_);
+            }
         }
     }
 
@@ -136,7 +152,6 @@ namespace axispose
             RCLCPP_ERROR(this->get_logger(), "cv_bridge mask conversion failed: %s", e.what());
             return;
         }
-        auto organized = depthMaskToPointCloud(depth_cv);
         // std::cout << "organized cloud size: " << organized->width << " x " << organized->height << std::endl;
 
         // If we have color intrinsics, align depth to color image size and mask directly.
@@ -160,7 +175,7 @@ namespace axispose
         }
 
         // convert to organized point cloud (one point per pixel, NaN for invalid) - now only depth is passed
-        // auto organized = depthMaskToPointCloud(depth_filtered);
+        auto organized = pc_processor_->depthMaskToPointCloud(depth_filtered, fx_, fy_, cx_, cy_);
         if (!organized || organized->empty())
         {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Empty organized point cloud after mask filtering");
@@ -197,13 +212,6 @@ namespace axispose
             timing_logger_->tok("denoise");
         }
 
-        // publish debug organized cloud
-        sensor_msgs::msg::PointCloud2 cloud_msg;
-        pcl::toROSMsg(*organized, cloud_msg);
-        cloud_msg.header.stamp = depth_msg->header.stamp;
-        cloud_msg.header.frame_id = frame_id_;
-        debug_cloud_pub_->publish(cloud_msg);
-
         // compute pose using valid_cloud
         geometry_msgs::msg::PoseStamped pose_msg;
         if (use_sacline_)
@@ -233,129 +241,31 @@ namespace axispose
         pose_msg.header.stamp = depth_msg->header.stamp;
         pose_msg.header.frame_id = frame_id_;
         pose_pub_->publish(pose_msg);
+
+        // publish debug organized cloud
+        sensor_msgs::msg::PointCloud2 cloud_msg;
+        pcl::toROSMsg(*organized, cloud_msg);
+        // pcl::toROSMsg(*valid_cloud, cloud_msg);
+        cloud_msg.header.stamp = depth_msg->header.stamp;
+        cloud_msg.header.frame_id = frame_id_;
+        if (!debug_ || debug_->enabled("debug_cloud"))
+        {
+            debug_cloud_pub_->publish(cloud_msg);
+        }
     }
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr PoseEstimate::depthMaskToPointCloud(const cv::Mat &depth)
     {
-        // Create an organized cloud with width = cols, height = rows
-        const int rows = depth.rows;
-        const int cols = depth.cols;
-        auto cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-
-        cloud->is_dense = false;
-        cloud->width = static_cast<uint32_t>(cols);
-        cloud->height = static_cast<uint32_t>(rows);
-        cloud->points.resize(cloud->width * cloud->height);
-        cloud->header.frame_id = frame_id_;
-
-        // compute constants similar to image_pipeline
-        double unit_scaling = 0.001; // assume uint16 in mm -> meters
-        bool depth_is_float = (depth.type() == CV_32F);
-        if (depth_is_float)
-            unit_scaling = 1.0; // already in meters
-
-        float constant_x = static_cast<float>(unit_scaling / fx_);
-        float constant_y = static_cast<float>(unit_scaling / fy_);
-        float center_x = static_cast<float>(cx_);
-        float center_y = static_cast<float>(cy_);
-        float bad_point = std::numeric_limits<float>::quiet_NaN();
-
-        for (int v = 0; v < rows; ++v)
-        {
-            for (int u = 0; u < cols; ++u)
-            {
-                size_t idx = static_cast<size_t>(v) * cols + u;
-                // default bad
-                pcl::PointXYZ &pt = cloud->points[idx];
-                pt.x = bad_point;
-                pt.y = bad_point;
-                pt.z = bad_point;
-
-                double depth_val = 0.0;
-                if (!depth_is_float)
-                {
-                    uint16_t d = depth.at<uint16_t>(v, u);
-                    if (d == 0) // ignore zero
-                        continue;
-                    depth_val = static_cast<double>(d); // in mm
-                }
-                else
-                {
-                    float d = depth.at<float>(v, u);
-                    if (!(d > 0.0f))
-                        continue;
-                    depth_val = static_cast<double>(d); // in meters
-                }
-
-                // compute XYZ using image_pipeline style: X = (u - cx) * depth * (unit_scaling / fx)
-                float z = static_cast<float>(depth_val * unit_scaling);
-                float x = (static_cast<float>(u) - center_x) * static_cast<float>(depth_val) * constant_x;
-                float y = (static_cast<float>(v) - center_y) * static_cast<float>(depth_val) * constant_y;
-
-                // adjust coordinate system to match previous convention (z forward -> keep as z)
-                pt.x = z;
-                pt.y = -x;
-                pt.z = -y;
-            }
-        }
-
-        return cloud;
+        return pc_processor_->depthMaskToPointCloud(depth, fx_, fy_, cx_, cy_);
     }
 
     cv::Mat PoseEstimate::alignDepthToColor(const cv::Mat &depth, int color_width, int color_height)
     {
-        // depth: CV_16U (mm) or CV_32F (meters)
-        cv::Mat aligned = cv::Mat::zeros(color_height, color_width, CV_16U);
-
-        bool depth_is_float = (depth.type() == CV_32F);
-
-        const int d_rows = depth.rows;
-        const int d_cols = depth.cols;
-
-        for (int v = 0; v < d_rows; ++v)
+        if (depth_aligner_)
         {
-            for (int u = 0; u < d_cols; ++u)
-            {
-                double depth_val_m = 0.0;
-                if (!depth_is_float)
-                {
-                    uint16_t d = depth.at<uint16_t>(v, u);
-                    if (d == 0 || d > 10000)
-                        continue;
-                    depth_val_m = static_cast<double>(d) * 0.001; // mm -> m
-                }
-                else
-                {
-                    float d = depth.at<float>(v, u);
-                    if (!(d > 0.0f))
-                        continue;
-                    depth_val_m = static_cast<double>(d);
-                }
-
-                // Back-project to 3D in depth camera frame
-                double X = (static_cast<double>(u) - cx_) * depth_val_m / fx_;
-                double Y = (static_cast<double>(v) - cy_) * depth_val_m / fy_;
-                double Z = depth_val_m;
-
-                // Project into color image using color intrinsics
-                if (Z <= 0.0)
-                    continue;
-                int u_c = static_cast<int>(std::round((X * color_fx_ / Z) + color_cx_));
-                int v_c = static_cast<int>(std::round((Y * color_fy_ / Z) + color_cy_));
-
-                if (u_c < 0 || u_c >= color_width || v_c < 0 || v_c >= color_height)
-                    continue;
-
-                uint16_t d_mm = static_cast<uint16_t>(std::round(Z * 1000.0));
-                uint16_t &cell = aligned.at<uint16_t>(v_c, u_c);
-                if (cell == 0 || d_mm < cell)
-                {
-                    cell = d_mm;
-                }
-            }
+            return depth_aligner_->align(depth, color_width, color_height);
         }
-
-        return aligned;
+        return cv::Mat();
     }
 
     void PoseEstimate::denoisePointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud)
@@ -405,7 +315,10 @@ namespace axispose
             ec.setInputCloud(cloud);
             ec.extract(cluster_indices);
             pcl::PointIndices::Ptr best_cluster_indices(new pcl::PointIndices);
-            std::cout << "Found " << cluster_indices.size() << " clusters." << std::endl;
+            if (!debug_ || debug_->enabled("debug_clusters"))
+            {
+                RCLCPP_INFO(this->get_logger(), "Found %zu clusters.", cluster_indices.size());
+            }
             if (!cluster_indices.empty())
             {
                 // 找到质心离原点 (0,0,0) 最近的 cluster

@@ -26,10 +26,15 @@ namespace axispose
         message_filters::Subscriber<Image> rgb_sub_;
         message_filters::Subscriber<Image> mask_sub_;
         message_filters::Subscriber<Pose> pose_sub_;
-        message_filters::Subscriber<CameraInfo> caminfo_sub_;
+        // camera_info is static/latched; keep regular rclcpp subscriptions for
+        // both color and depth caminfo and cache them.
+        rclcpp::Subscription<CameraInfo>::SharedPtr caminfo_color_sub_;
+        rclcpp::Subscription<CameraInfo>::SharedPtr caminfo_depth_sub_;
+        CameraInfo::SharedPtr cached_caminfo_color_;
+        CameraInfo::SharedPtr cached_caminfo_depth_;
 
-        // approximate time sync policy (RGB, Pose, CameraInfo, Mask)
-        using ApproxSyncPolicy = message_filters::sync_policies::ApproximateTime<Image, Pose, CameraInfo, Image>;
+        // approximate time sync policy (RGB, Pose, Mask)
+        using ApproxSyncPolicy = message_filters::sync_policies::ApproximateTime<Image, Pose, Image>;
         std::shared_ptr<message_filters::Synchronizer<ApproxSyncPolicy>> sync_;
 
         // publisher for visualization image
@@ -38,7 +43,6 @@ namespace axispose
         // callback invoked with synchronized messages
         void syncCallback(const Image::ConstSharedPtr rgb_msg,
                           const Pose::ConstSharedPtr pose_msg,
-                          const CameraInfo::ConstSharedPtr cam_info_msg,
                           const Image::ConstSharedPtr mask_msg);
 
         // parameters

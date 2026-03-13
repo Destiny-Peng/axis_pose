@@ -27,6 +27,9 @@
 #include <pcl/ModelCoefficients.h>
 
 #include "axispose/logger.hpp"
+#include "axispose/debug_manager.hpp"
+#include "axispose/point_cloud_processor.hpp"
+#include "axispose/depth_aligner.hpp"
 
 #include <memory>
 
@@ -87,6 +90,13 @@ namespace axispose
         bool use_euclidean_cluster_ = true;
         int cluster_mode_ = 0;                     // 0: closest to origin, 1: largest cluster, 2: RANSAC line inliers
         double sacline_distance_threshold_ = 0.05; // meters
+
+        // Debug manager (runtime flags via parameter `debug_flags`)
+        std::shared_ptr<DebugManager> debug_;
+
+        // Helpers (extracted)
+        std::unique_ptr<PointCloudProcessor> pc_processor_;
+        std::unique_ptr<DepthAligner> depth_aligner_;
 
         // Callbacks
         void cameraInfoDepthCallback(const CameraInfo::SharedPtr msg);

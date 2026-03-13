@@ -2,7 +2,7 @@
   ros__parameters:
     publish_rate: 2.0
     frame_id: camera_color_optical_frame
-    camera_name: d555
+    camera_name: d457
     loop: true
     voxel_leaf_size: 0.025
     sor_mean_k: 20.0
@@ -18,3 +18,5 @@
     color_camera_info_topic: /camera/color/camera_info
     depth_camera_info_topic: /camera/depth/camera_info
     mask_topic: /yolo/mask
+    # Debug flags: list of strings, e.g. ['debug_cloud','debug_clusters']
+    debug_flags: ["debug_cloud"]

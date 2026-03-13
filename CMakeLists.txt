@@ -27,6 +27,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(camera_info_manager REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(TensorRT-YOLO REQUIRED)
 find_package(PCL REQUIRED)
 find_package(pcl_conversions REQUIRED)
@@ -62,6 +63,7 @@ ament_target_dependencies(CameraDriver
   cv_bridge
   image_transport
   camera_info_manager
+  ament_index_cpp
 )
 rclcpp_components_register_nodes(CameraDriver PLUGIN "axispose::CameraDriver" EXECUTABLE camera_driver_node)
 
@@ -92,6 +94,8 @@ rclcpp_components_register_nodes(SegmentNode PLUGIN "axispose::SegmentNode" EXEC
 # next one
 add_library(PoseEstimate SHARED
   src/poseEstimate.cpp
+  src/depth_aligner.cpp
+  src/point_cloud_processor.cpp
 )
 target_link_libraries(PoseEstimate
   ${OpenCV_LIBS}

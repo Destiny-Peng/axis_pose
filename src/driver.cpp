@@ -10,6 +10,7 @@
 #include <cv_bridge/cv_bridge.h>
 #include <sensor_msgs/image_encodings.hpp>
 #include <camera_info_manager/camera_info_manager.hpp>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 
 #include "rclcpp_components/register_node_macro.hpp"
 
@@ -51,14 +52,49 @@ namespace axispose
         RCLCPP_INFO(this->get_logger(), "CameraDriver: rgb_dir=%s depth_dir=%s color_camera_info_file=%s depth_camera_info_file=%s rate=%.2f frame_id=%s loop=%s",
                     rgb_dir_.c_str(), depth_dir_.c_str(), color_camera_info_file_.c_str(), depth_camera_info_file_.c_str(), publish_rate_, frame_id_.c_str(), loop_ ? "true" : "false");
 
+        // If camera info file paths are not provided explicitly, try to construct
+        // them from the package share `config/<camera_name>_color.yaml` and
+        // `config/<camera_name>_depth.yaml` so users can simply set `camera_name`
+        // in `param.yaml`.
+        if (color_camera_info_file_.empty() || depth_camera_info_file_.empty())
+        {
+            try
+            {
+                std::string share = ament_index_cpp::get_package_share_directory("axispose");
+                if (color_camera_info_file_.empty())
+                {
+                    fs::path p = fs::path(share) / "config" / (camera_name_ + std::string("_color.yaml"));
+                    color_camera_info_file_ = p.string();
+                    RCLCPP_INFO(this->get_logger(), "Auto-selected color camera_info: %s", color_camera_info_file_.c_str());
+                }
+                if (depth_camera_info_file_.empty())
+                {
+                    fs::path p = fs::path(share) / "config" / (camera_name_ + std::string("_depth.yaml"));
+                    depth_camera_info_file_ = p.string();
+                    RCLCPP_INFO(this->get_logger(), "Auto-selected depth camera_info: %s", depth_camera_info_file_.c_str());
+                }
+            }
+            catch (const std::exception &e)
+            {
+                RCLCPP_WARN(this->get_logger(), "failed to locate package share for axispose: %s", e.what());
+            }
+        }
+
         // publishers
         rclcpp::QoS qos(rclcpp::KeepLast(5));
         rgb_pub_ = this->create_publisher<sensor_msgs::msg::Image>(color_image_topic_, qos);
         depth_pub_ = this->create_publisher<sensor_msgs::msg::Image>(depth_image_topic_, qos);
         // camera_info should be latched for late subscribers: use transient_local QoS
         rclcpp::QoS caminfo_qos = rclcpp::QoS(rclcpp::KeepLast(1)).transient_local();
-        color_caminfo_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(color_camera_info_topic_, caminfo_qos);
-        depth_caminfo_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(depth_camera_info_topic_, caminfo_qos);
+        // Create camera_info publishers as transient_local but disable intra-process
+        // communication for these publishers so they can be latched while the rest
+        // of the node/container still uses intra-process for images.
+        rclcpp::PublisherOptions caminfo_options;
+        // Disable intra-process comms for camera_info publishers so transient_local
+        // durability is allowed even when the container uses intra-process for images.
+        caminfo_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Disable;
+        color_caminfo_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(color_camera_info_topic_, caminfo_qos, caminfo_options);
+        depth_caminfo_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(depth_camera_info_topic_, caminfo_qos, caminfo_options);
 
         // load camera info via camera_info_manager if available
         if (!color_camera_info_file_.empty())
@@ -218,7 +254,7 @@ namespace axispose
                 RCLCPP_WARN(this->get_logger(), "failed to read depth image for preload: %s", f.c_str());
                 continue;
             }
-            RCLCPP_INFO(this->get_logger(), "depth image %s type=%d", f.c_str(), dimg.type());
+            // RCLCPP_INFO(this->get_logger(), "depth image %s type=%d", f.c_str(), dimg.type());
             // ensure depth is 16UC1
             if (dimg.type() != CV_16UC1)
             {
@@ -433,7 +469,7 @@ namespace axispose
             depth_msgs_[idx]->header.stamp = now;
             depth_msgs_[idx]->header.frame_id = frame_id_ + std::string("_depth");
             depth_pub_->publish(*depth_msgs_[idx]);
-            RCLCPP_INFO(this->get_logger(), "Published preloaded rgb/depth image %s,%s", rgb_files_[idx].c_str(), depth_files_[idx].c_str());
+            // RCLCPP_INFO(this->get_logger(), "Published preloaded rgb/depth image %s,%s", rgb_files_[idx].c_str(), depth_files_[idx].c_str());
         }
         else
         {

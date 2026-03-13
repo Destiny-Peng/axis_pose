@@ -19,12 +19,14 @@ namespace axispose
         this->declare_parameter("color_image_topic", std::string("/camera/rgb/image_raw"));
         this->declare_parameter("pose_topic", std::string("/shaft/pose"));
         this->declare_parameter("camera_info_topic", std::string("/camera/color/camera_info"));
+        this->declare_parameter("depth_camera_info_topic", std::string("/camera/depth/camera_info"));
         this->declare_parameter("axis_length", axis_length_);
 
         std::string mask_topic = this->get_parameter("mask_topic").as_string();
         std::string color_image_topic = this->get_parameter("color_image_topic").as_string();
         std::string pose_topic = this->get_parameter("pose_topic").as_string();
         std::string caminfo_topic = this->get_parameter("camera_info_topic").as_string();
+        std::string depth_caminfo_topic = this->get_parameter("depth_camera_info_topic").as_string();
         axis_length_ = this->get_parameter("axis_length").as_double();
 
         rclcpp::QoS qos(rclcpp::KeepLast(5));
@@ -32,11 +34,34 @@ namespace axispose
         // Use message_filters subscribers
         rgb_sub_.subscribe(this, color_image_topic, qos.get_rmw_qos_profile());
         pose_sub_.subscribe(this, pose_topic, qos.get_rmw_qos_profile());
-        // subscribe to color camera_info (used for projecting into color image)
-        caminfo_sub_.subscribe(this, caminfo_topic, qos.get_rmw_qos_profile());
+
+        // camera_info is latched/transient_local and static — subscribe with
+        // transient_local QoS and disable intra-process on these subscriptions
+        // only so we can keep container-level intra-process enabled.
+        rclcpp::QoS caminfo_qos = rclcpp::QoS(rclcpp::KeepLast(1)).transient_local();
+        rclcpp::SubscriptionOptions caminfo_sub_options;
+        caminfo_sub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Disable;
+        caminfo_color_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
+            caminfo_topic, caminfo_qos,
+            [this](const sensor_msgs::msg::CameraInfo::SharedPtr msg)
+            {
+                this->cached_caminfo_color_ = msg;
+                RCLCPP_DEBUG(this->get_logger(), "cached color camera_info received");
+            },
+            caminfo_sub_options);
+        caminfo_depth_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
+            depth_caminfo_topic, caminfo_qos,
+            [this](const sensor_msgs::msg::CameraInfo::SharedPtr msg)
+            {
+                this->cached_caminfo_depth_ = msg;
+                RCLCPP_DEBUG(this->get_logger(), "cached depth camera_info received");
+            },
+            caminfo_sub_options);
+
         mask_sub_.subscribe(this, mask_topic, qos.get_rmw_qos_profile());
 
-        sync_.reset(new message_filters::Synchronizer<ApproxSyncPolicy>(ApproxSyncPolicy(10), rgb_sub_, pose_sub_, caminfo_sub_, mask_sub_));
+        // Synchronize RGB, Pose and Mask only; CameraInfo is read from cache.
+        sync_.reset(new message_filters::Synchronizer<ApproxSyncPolicy>(ApproxSyncPolicy(10), rgb_sub_, pose_sub_, mask_sub_));
         sync_->registerCallback(&Visualization::syncCallback, this);
 
         vis_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/shaft/vis_image", 1);
@@ -61,9 +86,25 @@ namespace axispose
 
     void Visualization::syncCallback(const Image::ConstSharedPtr rgb_msg,
                                      const Pose::ConstSharedPtr pose_msg,
-                                     const CameraInfo::ConstSharedPtr cam_info_msg,
                                      const Image::ConstSharedPtr mask_msg)
     {
+        RCLCPP_DEBUG(this->get_logger(), "Visualization::syncCallback invoked");
+        // choose camera_info matching the pose frame if possible
+        CameraInfo::SharedPtr caminfo_to_use;
+        if (cached_caminfo_color_ && pose_msg->header.frame_id == cached_caminfo_color_->header.frame_id)
+            caminfo_to_use = cached_caminfo_color_;
+        else if (cached_caminfo_depth_ && pose_msg->header.frame_id == cached_caminfo_depth_->header.frame_id)
+            caminfo_to_use = cached_caminfo_depth_;
+        else if (cached_caminfo_color_)
+            caminfo_to_use = cached_caminfo_color_;
+        else if (cached_caminfo_depth_)
+            caminfo_to_use = cached_caminfo_depth_;
+
+        if (!caminfo_to_use)
+        {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "Visualization: waiting for any camera_info before processing");
+            return;
+        }
         // convert rgb to cv::Mat (bgr8 assumed)
         cv::Mat rgb_cv;
         try
@@ -116,8 +157,8 @@ namespace axispose
 
         // project center and axis_end
         cv::Point2f pc, pe;
-        bool okc = projectPoint(center, *cam_info_msg, pc);
-        bool oke = projectPoint(axis_end, *cam_info_msg, pe);
+        bool okc = projectPoint(center, *caminfo_to_use, pc);
+        bool oke = projectPoint(axis_end, *caminfo_to_use, pe);
 
         // draw mask overlay (colored)
         cv::Mat vis = rgb_cv.clone();
