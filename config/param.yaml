@@ -18,5 +18,10 @@
     color_camera_info_topic: /camera/color/camera_info
     depth_camera_info_topic: /camera/depth/camera_info
     mask_topic: /yolo/mask
+    # input_mode controls where image/camera_info come from:
+    #  - 'driver' (default): this CameraDriver publishes images and camera_info
+    #  - 'bag': do not publish images nor camera_info (playback from bag expected)
+    #  - 'caminfo_only': only publish camera_info from the driver, use bag for images
+    input_mode: driver
     # Debug flags: list of strings, e.g. ['debug_cloud','debug_clusters']
     debug_flags: ["debug_cloud"]

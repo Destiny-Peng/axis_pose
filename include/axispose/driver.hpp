@@ -38,6 +38,10 @@ namespace axispose
         std::string camera_name_;
         double publish_rate_;
         bool loop_;
+        // input mode: 'driver'|'bag'|'caminfo_only'
+        std::string input_mode_ = "driver";
+        bool publish_images_ = true;
+        bool publish_caminfo_ = true;
 
         // file lists and index
         std::vector<std::string> rgb_files_;

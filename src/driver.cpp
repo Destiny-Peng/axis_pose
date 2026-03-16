@@ -44,6 +44,24 @@ namespace axispose
         this->get_parameter("publish_rate", publish_rate_);
         this->get_parameter("loop", loop_);
         this->get_parameter("camera_name", camera_name_);
+        // input_mode controls whether this driver produces images and/or camera_info
+        this->declare_parameter<std::string>("input_mode", std::string("driver"));
+        this->get_parameter("input_mode", input_mode_);
+        if (input_mode_ == "driver")
+        {
+            publish_images_ = true;
+            publish_caminfo_ = true;
+        }
+        else if (input_mode_ == "caminfo_only")
+        {
+            publish_images_ = false;
+            publish_caminfo_ = true;
+        }
+        else // 'bag' or any other
+        {
+            publish_images_ = false;
+            publish_caminfo_ = false;
+        }
         std::string color_image_topic_ = this->get_parameter("color_image_topic").as_string();
         std::string depth_image_topic_ = this->get_parameter("depth_image_topic").as_string();
         std::string color_camera_info_topic_ = this->get_parameter("color_camera_info_topic").as_string();
@@ -82,8 +100,11 @@ namespace axispose
 
         // publishers
         rclcpp::QoS qos(rclcpp::KeepLast(5));
-        rgb_pub_ = this->create_publisher<sensor_msgs::msg::Image>(color_image_topic_, qos);
-        depth_pub_ = this->create_publisher<sensor_msgs::msg::Image>(depth_image_topic_, qos);
+        if (publish_images_)
+        {
+            rgb_pub_ = this->create_publisher<sensor_msgs::msg::Image>(color_image_topic_, qos);
+            depth_pub_ = this->create_publisher<sensor_msgs::msg::Image>(depth_image_topic_, qos);
+        }
         // camera_info should be latched for late subscribers: use transient_local QoS
         rclcpp::QoS caminfo_qos = rclcpp::QoS(rclcpp::KeepLast(1)).transient_local();
         // Create camera_info publishers as transient_local but disable intra-process
@@ -93,8 +114,11 @@ namespace axispose
         // Disable intra-process comms for camera_info publishers so transient_local
         // durability is allowed even when the container uses intra-process for images.
         caminfo_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Disable;
-        color_caminfo_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(color_camera_info_topic_, caminfo_qos, caminfo_options);
-        depth_caminfo_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(depth_camera_info_topic_, caminfo_qos, caminfo_options);
+        if (publish_caminfo_)
+        {
+            color_caminfo_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(color_camera_info_topic_, caminfo_qos, caminfo_options);
+            depth_caminfo_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(depth_camera_info_topic_, caminfo_qos, caminfo_options);
+        }
 
         // load camera info via camera_info_manager if available
         if (!color_camera_info_file_.empty())
@@ -173,26 +197,27 @@ namespace axispose
 
         // Publish camera_info immediately (latched) so late subscribers receive them
         rclcpp::Time now = this->now();
-        if (color_caminfo_pub_)
+        if (publish_caminfo_ && color_caminfo_pub_)
         {
             color_camera_info_msg_.header.stamp = now;
             color_caminfo_pub_->publish(color_camera_info_msg_);
         }
-        if (depth_caminfo_pub_)
+        if (publish_caminfo_ && depth_caminfo_pub_)
         {
             depth_camera_info_msg_.header.stamp = now;
             depth_caminfo_pub_->publish(depth_camera_info_msg_);
         }
 
-        // load image lists
-        load_image_lists();
+        // load image lists and preload only if publishing images
+        if (publish_images_)
+        {
+            load_image_lists();
+            preload_images();
 
-        // preload images into messages
-        preload_images();
-
-        // timer for images
-        auto period = std::chrono::duration<double>(1.0 / std::max(0.001, publish_rate_));
-        image_timer_ = this->create_wall_timer(std::chrono::duration_cast<std::chrono::nanoseconds>(period), std::bind(&CameraDriver::publish_timer_callback, this));
+            // timer for images
+            auto period = std::chrono::duration<double>(1.0 / std::max(0.001, publish_rate_));
+            image_timer_ = this->create_wall_timer(std::chrono::duration_cast<std::chrono::nanoseconds>(period), std::bind(&CameraDriver::publish_timer_callback, this));
+        }
         param_subscriber_ = std::make_shared<rclcpp::ParameterEventHandler>(this);
         // parameter callback to allow runtime publish_rate change
         auto publish_rate_callback = [this](const rclcpp::Parameter &p)
