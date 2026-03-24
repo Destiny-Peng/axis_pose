@@ -4,10 +4,10 @@
 #include <pcl/common/centroid.h>
 #include <pcl/common/eigen.h>
 #include <Eigen/Dense>
-#include "axispose/logger.hpp"
 #include <cmath>
 #include <sstream>
 #include <cstdint>
+#include <tuple>
 
 namespace axispose
 {
@@ -75,14 +75,18 @@ namespace axispose
         pc_processor_ = std::make_unique<PointCloudProcessor>();
         depth_aligner_ = std::make_unique<DepthAligner>();
 
-        // initialize statistics collector instance
-        if (statistics_enabled_)
+        // initialize benchmark/metrics logger (records per-frame metrics to CSV)
+        try
         {
-            distance_recorder_ = std::make_shared<PointDistanceLogger>(statistics_directory_path_ + "/" + distance_file_name);
-            distance_recorder_1 = std::make_shared<PointDistanceLogger>(statistics_directory_path_ + "/" + distance_file_name_1);
-            point_number_logger_ = std::make_shared<PointNumberLogger>(statistics_directory_path_ + "/" + pointnumber_file_name);
-            timing_logger_ = std::make_shared<SimpleTimingLogger>(statistics_directory_path_ + "/" + timing_file_name);
-            RCLCPP_INFO(this->get_logger(), "PointDistanceLogger initialized, output path: %s", statistics_directory_path_.c_str());
+            benchmark_ = std::make_unique<AlgorithmBenchmark>(statistics_directory_path_, "metrics.csv", statistics_enabled_, std::vector<std::string>{"valid_points", "pose_x", "pose_y", "pose_z", "qx", "qy", "qz", "qw"});
+            if (statistics_enabled_)
+                RCLCPP_INFO(this->get_logger(), "Benchmark metrics enabled, output: %s/metrics.csv", statistics_directory_path_.c_str());
+        }
+        catch (const std::exception &e)
+        {
+            RCLCPP_WARN(this->get_logger(), "Failed to initialize benchmark logger: %s", e.what());
+            // continue without metrics
+            benchmark_.reset();
         }
     }
 
@@ -201,42 +205,75 @@ namespace axispose
             return;
         }
 
-        // denoise
-        if (statistics_enabled_)
+        // denoise (record time and remaining valid points)
+        if (benchmark_)
         {
-            timing_logger_->tik("denoise");
+            benchmark_->run("denoise", [this, &valid_cloud]() -> size_t
+                            {
+                this->denoisePointCloud(valid_cloud);
+                return valid_cloud->size(); }, [](size_t n) -> std::vector<std::string>
+                            { return {std::to_string(n)}; });
         }
-        // denoisePointCloud(valid_cloud);
-        if (statistics_enabled_)
+        else
         {
-            timing_logger_->tok("denoise");
+            denoisePointCloud(valid_cloud);
         }
 
         // compute pose using valid_cloud
         geometry_msgs::msg::PoseStamped pose_msg;
-        if (use_sacline_)
+        if (benchmark_)
         {
-            if (statistics_enabled_)
+            if (use_sacline_)
             {
-                timing_logger_->tik("sacline");
+                auto tup = benchmark_->run("pose_sacline", [this, &valid_cloud, &depth_msg]()
+                                           {
+                    auto p = this->computePoseFromSACLine(valid_cloud, depth_msg->header.stamp);
+                    return std::make_tuple(p, static_cast<size_t>(valid_cloud->size())); }, [](const std::tuple<geometry_msgs::msg::PoseStamped, size_t> &t) -> std::vector<std::string>
+                                           {
+                    const auto &pose = std::get<0>(t).pose;
+                    size_t n = std::get<1>(t);
+                    std::vector<std::string> out;
+                    out.reserve(8);
+                    out.push_back(std::to_string(n));
+                    out.push_back(std::to_string(pose.position.x));
+                    out.push_back(std::to_string(pose.position.y));
+                    out.push_back(std::to_string(pose.position.z));
+                    out.push_back(std::to_string(pose.orientation.x));
+                    out.push_back(std::to_string(pose.orientation.y));
+                    out.push_back(std::to_string(pose.orientation.z));
+                    out.push_back(std::to_string(pose.orientation.w));
+                    return out; });
+                pose_msg = std::get<0>(tup);
             }
-            pose_msg = computePoseFromSACLine(valid_cloud, depth_msg->header.stamp);
-            if (statistics_enabled_)
+            else
             {
-                timing_logger_->tok("sacline");
+                auto tup = benchmark_->run("pose_covariance", [this, &valid_cloud, &depth_msg]()
+                                           {
+                    auto p = this->computePoseFromCloud(valid_cloud, depth_msg->header.stamp);
+                    return std::make_tuple(p, static_cast<size_t>(valid_cloud->size())); }, [](const std::tuple<geometry_msgs::msg::PoseStamped, size_t> &t) -> std::vector<std::string>
+                                           {
+                    const auto &pose = std::get<0>(t).pose;
+                    size_t n = std::get<1>(t);
+                    std::vector<std::string> out;
+                    out.reserve(8);
+                    out.push_back(std::to_string(n));
+                    out.push_back(std::to_string(pose.position.x));
+                    out.push_back(std::to_string(pose.position.y));
+                    out.push_back(std::to_string(pose.position.z));
+                    out.push_back(std::to_string(pose.orientation.x));
+                    out.push_back(std::to_string(pose.orientation.y));
+                    out.push_back(std::to_string(pose.orientation.z));
+                    out.push_back(std::to_string(pose.orientation.w));
+                    return out; });
+                pose_msg = std::get<0>(tup);
             }
         }
         else
         {
-            if (statistics_enabled_)
-            {
-                timing_logger_->tik("covariance");
-            }
-            pose_msg = computePoseFromCloud(valid_cloud, depth_msg->header.stamp);
-            if (statistics_enabled_)
-            {
-                timing_logger_->tok("covariance");
-            }
+            if (use_sacline_)
+                pose_msg = computePoseFromSACLine(valid_cloud, depth_msg->header.stamp);
+            else
+                pose_msg = computePoseFromCloud(valid_cloud, depth_msg->header.stamp);
         }
         pose_msg.header.stamp = depth_msg->header.stamp;
         pose_msg.header.frame_id = frame_id_;
@@ -281,10 +318,7 @@ namespace axispose
             vg.setInputCloud(cloud);
             vg.setLeafSize(static_cast<float>(voxel_leaf_size_), static_cast<float>(voxel_leaf_size_), static_cast<float>(voxel_leaf_size_));
             vg.filter(*tmp);
-            if (statistics_enabled_)
-            {
-                point_number_logger_->logCounts(cloud->size(), tmp->size());
-            }
+
             cloud.swap(tmp);
             tmp->clear();
         }
@@ -359,10 +393,7 @@ namespace axispose
                 case 2:
                 default:
                 { // 策略3：对每个cluster做ransac,找拟合直线inliers最多的cluster
-                    if (statistics_enabled_)
-                    {
-                        timing_logger_->tik("cluster_ransac");
-                    }
+
                     pcl::PointCloud<pcl::PointXYZ>::Ptr cluster_cloud(new pcl::PointCloud<pcl::PointXYZ>);
                     size_t inlier_cnt = 0;
                     // 使用extraction提取当前cluster的点云
@@ -394,10 +425,6 @@ namespace axispose
                             *coefficients = *coefficients_tmp;
                             *best_cluster_indices = *inliers;
                         }
-                    }
-                    if (statistics_enabled_)
-                    {
-                        timing_logger_->tok("cluster_ransac");
                     }
                 }
                 break;

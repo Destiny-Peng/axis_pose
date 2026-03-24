@@ -110,6 +110,24 @@ ros2 launch axispose launch.py
 - 支持读取 color↔depth 外参（YAML 或 TF），并使用 OpenCV 的 rectification / `rgbd::registerDepth` 进行更精确对齐。
 - 增加单元测试与 CI，文档化更多示例与常见问题。
 
+## 实验管理与绘图工具
+
+- `tools/experiment_runner.py`: 运行参数扫表并自动收集每次试验的 `metrics.csv` 到独立的 run 目录。用法示例：
+
+```bash
+python3 tools/experiment_runner.py examples/experiments.yaml
+```
+
+- `tools/plot_metrics.py`: 从 `metrics.csv` 生成每阶段的时序图与直方图（依赖 `pandas` 和 `matplotlib`）：
+
+```bash
+pip install -r requirements.txt
+python3 tools/plot_metrics.py statistics_runs
+```
+
+注记：`experiment_runner.py` 假设你的 `launch.py` 接受 `params` 参数：
+`ros2 launch axispose launch.py params:=/abs/path/to/params.yaml`。Runner 会在每个 run 的 params 中设置 `statistics_directory_path` 指向该 run 的目录并启用 `statistics_enabled`。
+
 ---
 
 如果你需要，我可以：

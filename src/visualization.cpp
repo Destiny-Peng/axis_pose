@@ -9,6 +9,10 @@
 #include <message_filters/sync_policies/approximate_time.h>
 // Use Eigen instead of tf2 for rotations
 #include <Eigen/Geometry>
+#include <filesystem>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 
 namespace axispose
 {
@@ -21,6 +25,11 @@ namespace axispose
         this->declare_parameter("camera_info_topic", std::string("/camera/color/camera_info"));
         this->declare_parameter("depth_camera_info_topic", std::string("/camera/depth/camera_info"));
         this->declare_parameter("axis_length", axis_length_);
+        this->declare_parameter("statistics_directory_path", std::string(""));
+        // saving annotated images
+        this->declare_parameter("save_visualization", false);
+        this->declare_parameter("save_dir", std::string("statistics/vis"));
+        this->declare_parameter("save_every_n", 1);
 
         std::string mask_topic = this->get_parameter("mask_topic").as_string();
         std::string color_image_topic = this->get_parameter("color_image_topic").as_string();
@@ -28,6 +37,45 @@ namespace axispose
         std::string caminfo_topic = this->get_parameter("camera_info_topic").as_string();
         std::string depth_caminfo_topic = this->get_parameter("depth_camera_info_topic").as_string();
         axis_length_ = this->get_parameter("axis_length").as_double();
+        save_annotated_ = this->get_parameter("save_visualization").as_bool();
+        save_dir_ = this->get_parameter("save_dir").as_string();
+        std::string stats_dir = this->get_parameter("statistics_directory_path").as_string();
+        if (!stats_dir.empty())
+        {
+            try
+            {
+                std::filesystem::path p = std::filesystem::absolute(std::filesystem::path(stats_dir));
+                p /= "vis";
+                if (!std::filesystem::exists(p))
+                    std::filesystem::create_directories(p);
+                save_dir_ = p.string();
+                RCLCPP_INFO(this->get_logger(), "Visualization: overridden save_dir -> %s (from statistics_directory_path)", save_dir_.c_str());
+            }
+            catch (const std::exception &e)
+            {
+                RCLCPP_WARN(this->get_logger(), "Visualization: failed to create statistics-based save_dir '%s': %s", stats_dir.c_str(), e.what());
+            }
+        }
+        save_every_n_ = this->get_parameter("save_every_n").as_int();
+        if (save_every_n_ <= 0)
+            save_every_n_ = 1;
+
+        if (save_annotated_)
+        {
+            try
+            {
+                std::filesystem::path p = std::filesystem::absolute(std::filesystem::path(save_dir_));
+                if (!std::filesystem::exists(p))
+                    std::filesystem::create_directories(p);
+                save_dir_ = p.string();
+                RCLCPP_INFO(this->get_logger(), "Visualization: saving annotated images to %s (every %d frames)", save_dir_.c_str(), save_every_n_);
+            }
+            catch (const std::exception &e)
+            {
+                RCLCPP_WARN(this->get_logger(), "Visualization: failed to create save_dir '%s': %s", save_dir_.c_str(), e.what());
+                save_annotated_ = false;
+            }
+        }
 
         rclcpp::QoS qos(rclcpp::KeepLast(5));
 
@@ -82,6 +130,24 @@ namespace axispose
         out.x = static_cast<float>(-(p.y / p.x) * fx + cx);
         out.y = static_cast<float>(-(p.z / p.x) * fy + cy);
         return true;
+    }
+
+    static std::string makeTimestampFilename(const builtin_interfaces::msg::Time &stamp)
+    {
+        std::time_t t = static_cast<std::time_t>(stamp.sec);
+        std::tm tm{};
+#ifdef _WIN32
+        localtime_s(&tm, &t);
+#else
+        localtime_r(&t, &tm);
+#endif
+        std::ostringstream ss;
+        // vis_YYYYMMDD_HHMMSS_mmm_nnnnnnnnn.png
+        ss << "vis_" << std::put_time(&tm, "%Y%m%d_%H%M%S")
+           << "_" << std::setw(3) << std::setfill('0') << (stamp.nanosec / 1000000U)
+           << "_" << std::setw(9) << std::setfill('0') << stamp.nanosec
+           << ".png";
+        return ss.str();
     }
 
     void Visualization::syncCallback(const Image::ConstSharedPtr rgb_msg,
@@ -174,9 +240,117 @@ namespace axispose
         {
             cv::circle(vis, pc, 6, cv::Scalar(0, 0, 255), -1);
         }
-        if (okc && oke)
+
+        if (okc)
         {
-            cv::line(vis, pc, pe, cv::Scalar(255, 0, 0), 2);
+            // determine a projected axis direction point; if axis_end projection failed,
+            // try projecting a far point along the axis to get a direction in image plane.
+            cv::Point2f dir_pt;
+            bool have_dir = false;
+            if (oke)
+            {
+                dir_pt = pe;
+                have_dir = true;
+            }
+            else
+            {
+                // try a far point along axis to estimate image direction
+                geometry_msgs::msg::Point axis_far;
+                axis_far.x = center.x + axis_dir_e.x() * axis_length_ * 100.0;
+                axis_far.y = center.y + axis_dir_e.y() * axis_length_ * 100.0;
+                axis_far.z = center.z + axis_dir_e.z() * axis_length_ * 100.0;
+                cv::Point2f pf;
+                if (projectPoint(axis_far, *caminfo_to_use, pf))
+                {
+                    dir_pt = pf;
+                    have_dir = true;
+                }
+            }
+
+            if (have_dir)
+            {
+                // build a line through pc in direction (dir_pt - pc) and clip to image bounds
+                cv::Point2f d = dir_pt - pc;
+                const int W = vis.cols;
+                const int H = vis.rows;
+                std::vector<cv::Point2f> ints;
+                // if direction is nearly zero, draw small short line
+                if (std::abs(d.x) < 1e-6 && std::abs(d.y) < 1e-6)
+                {
+                    cv::Point2f p1(pc.x - 50.0f, pc.y);
+                    cv::Point2f p2(pc.x + 50.0f, pc.y);
+                    cv::line(vis, p1, p2, cv::Scalar(255, 0, 0), 2);
+                }
+                else
+                {
+                    // intersections with x=0 and x=W-1
+                    if (std::abs(d.x) > 1e-9)
+                    {
+                        float t0 = (0.0f - pc.x) / d.x;
+                        float y0 = pc.y + t0 * d.y;
+                        if (y0 >= 0.0f && y0 <= static_cast<float>(H - 1))
+                            ints.emplace_back(0.0f, y0);
+                        float t1 = (static_cast<float>(W - 1) - pc.x) / d.x;
+                        float y1 = pc.y + t1 * d.y;
+                        if (y1 >= 0.0f && y1 <= static_cast<float>(H - 1))
+                            ints.emplace_back(static_cast<float>(W - 1), y1);
+                    }
+                    // intersections with y=0 and y=H-1
+                    if (std::abs(d.y) > 1e-9)
+                    {
+                        float t2 = (0.0f - pc.y) / d.y;
+                        float x2 = pc.x + t2 * d.x;
+                        if (x2 >= 0.0f && x2 <= static_cast<float>(W - 1))
+                            ints.emplace_back(x2, 0.0f);
+                        float t3 = (static_cast<float>(H - 1) - pc.y) / d.y;
+                        float x3 = pc.x + t3 * d.x;
+                        if (x3 >= 0.0f && x3 <= static_cast<float>(W - 1))
+                            ints.emplace_back(x3, static_cast<float>(H - 1));
+                    }
+
+                    // dedupe almost-equal points
+                    std::vector<cv::Point2f> uniq;
+                    for (const auto &p : ints)
+                    {
+                        bool found = false;
+                        for (const auto &q : uniq)
+                        {
+                            if (std::hypot(p.x - q.x, p.y - q.y) < 1e-2f)
+                            {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found)
+                            uniq.push_back(p);
+                    }
+
+                    if (uniq.size() >= 2)
+                    {
+                        // pick two most distant points
+                        size_t a = 0, b = 1;
+                        double bestd = 0.0;
+                        for (size_t i = 0; i < uniq.size(); ++i)
+                            for (size_t j = i + 1; j < uniq.size(); ++j)
+                            {
+                                double dd = std::hypot(uniq[i].x - uniq[j].x, uniq[i].y - uniq[j].y);
+                                if (dd > bestd)
+                                {
+                                    bestd = dd;
+                                    a = i;
+                                    b = j;
+                                }
+                            }
+                        cv::line(vis, uniq[a], uniq[b], cv::Scalar(255, 0, 0), 2);
+                    }
+                    else
+                    {
+                        // fallback: draw short line from pc toward dir_pt
+                        cv::Point2f p2 = pc + d * 50.0f;
+                        cv::line(vis, pc, p2, cv::Scalar(255, 0, 0), 2);
+                    }
+                }
+            }
         }
 
         // convert back to sensor_msgs::Image
@@ -195,6 +369,26 @@ namespace axispose
         out_msg->header.stamp = rgb_msg->header.stamp;
         out_msg->header.frame_id = rgb_msg->header.frame_id;
         vis_pub_->publish(*out_msg);
+
+        // optionally save annotated image to disk
+        if (save_annotated_)
+        {
+            save_counter_++;
+            if ((save_counter_ % static_cast<uint64_t>(save_every_n_)) == 0)
+            {
+                // filename: <save_dir>/vis_YYYYMMDD_HHMMSS_mmm_nnnnnnnnn.png
+                std::filesystem::path out_path = std::filesystem::path(save_dir_) / makeTimestampFilename(rgb_msg->header.stamp);
+                try
+                {
+                    cv::imwrite(out_path.string(), vis);
+                    RCLCPP_DEBUG(this->get_logger(), "Saved annotated image %s", out_path.string().c_str());
+                }
+                catch (const std::exception &e)
+                {
+                    RCLCPP_WARN(this->get_logger(), "Failed to save annotated image %s: %s", out_path.string().c_str(), e.what());
+                }
+            }
+        }
     }
 
 } // namespace axispose

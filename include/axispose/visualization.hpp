@@ -40,6 +40,12 @@ namespace axispose
         // publisher for visualization image
         rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr vis_pub_;
 
+        // image saving
+        bool save_annotated_ = false;
+        std::string save_dir_;
+        int save_every_n_ = 1; // save every N frames (1 = every frame)
+        uint64_t save_counter_ = 0;
+
         // callback invoked with synchronized messages
         void syncCallback(const Image::ConstSharedPtr rgb_msg,
                           const Pose::ConstSharedPtr pose_msg,

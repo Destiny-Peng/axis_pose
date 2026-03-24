@@ -9,7 +9,7 @@ import os
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import ComposableNodeContainer
 from launch_ros.descriptions import ComposableNode
 from ament_index_python.packages import get_package_share_directory
@@ -20,8 +20,8 @@ def generate_launch_description():
     pkg_directory = os.path.join(pkg_share, '..', '..', '..', '..')
 
     # 默认图片目录在包内 image/rgb 和 image/depth
-    default_rgb = os.path.join(pkg_directory, 'image1', 'rgb')
-    default_depth = os.path.join(pkg_directory, 'image1', 'depth')
+    default_rgb = os.path.join(pkg_directory, 'image_tag', 'rgb')
+    default_depth = os.path.join(pkg_directory, 'image_tag', 'depth')
     default_engine = os.path.join(
         pkg_directory, 'engine', 'occlusion.engine')
     default_statistic = os.path.join(
@@ -74,7 +74,10 @@ def generate_launch_description():
                 package='axispose',
                 plugin='axispose::Visualization',
                 name='visualization_component',
-                parameters=[param_file],
+                parameters=[param_file, {
+                    # default save dir is <statistic_directory>/vis so images are colocated with metrics
+                    'save_dir': PathJoinSubstitution([LaunchConfiguration('statistic_directory'), 'vis'])
+                }],
                 extra_arguments=[{'use_intra_process_comms': True}]
             ),
             ComposableNode(

@@ -26,7 +26,7 @@
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/ModelCoefficients.h>
 
-#include "axispose/logger.hpp"
+#include "axispose/benchmark.hpp"
 #include "axispose/debug_manager.hpp"
 #include "axispose/point_cloud_processor.hpp"
 #include "axispose/depth_aligner.hpp"
@@ -73,16 +73,10 @@ namespace axispose
         double voxel_leaf_size_ = 0.05; // meters
         double sor_mean_k_ = 50;
         double sor_std_mul_ = 1.0;
-        // Statistics collector (instance-based), created in constructor
+        // Statistics collector path
         std::string statistics_directory_path_;
-        std::shared_ptr<PointDistanceLogger> distance_recorder_;
-        std::string distance_file_name = "pose_point_to_line.csv";
-        std::shared_ptr<PointDistanceLogger> distance_recorder_1;
-        std::string distance_file_name_1 = "pose_point_to_line_sac.csv";
-        std::shared_ptr<PointNumberLogger> point_number_logger_;
-        std::string pointnumber_file_name = "point_numbers.csv";
-        std::shared_ptr<SimpleTimingLogger> timing_logger_;
-        std::string timing_file_name = "timing.csv";
+        // Benchmark / metrics logger
+        std::unique_ptr<AlgorithmBenchmark> benchmark_;
         pcl::ModelCoefficients::Ptr coefficients = std::make_shared<pcl::ModelCoefficients>();
         bool statistics_enabled_ = true;
         bool use_sor_ = true;
