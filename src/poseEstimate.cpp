@@ -7,6 +7,7 @@
 #include <cmath>
 #include <sstream>
 #include <cstdint>
+#include <cctype>
 #include <tuple>
 
 namespace axispose
@@ -24,6 +25,7 @@ namespace axispose
         this->declare_parameter("sor_std_mul", sor_std_mul_);
         this->declare_parameter("use_sor", use_sor_);
         this->declare_parameter("use_sacline", use_sacline_);
+        this->declare_parameter("algorithm_type", algorithm_type_);
         this->declare_parameter("use_euclidean_cluster", use_euclidean_cluster_);
         this->declare_parameter("cluster_mode", cluster_mode_); // 0: closest to origin, 1: largest cluster, 2: RANSAC line inliers
         this->declare_parameter("sacline_distance_threshold", sacline_distance_threshold_);
@@ -43,6 +45,7 @@ namespace axispose
         statistics_enabled_ = this->get_parameter("statistics_enabled").as_bool();
         use_sor_ = this->get_parameter("use_sor").as_bool();
         use_sacline_ = this->get_parameter("use_sacline").as_bool();
+        algorithm_type_ = this->get_parameter("algorithm_type").as_string();
         use_euclidean_cluster_ = this->get_parameter("use_euclidean_cluster").as_bool();
         cluster_mode_ = this->get_parameter("cluster_mode").as_int();
         sacline_distance_threshold_ = this->get_parameter("sacline_distance_threshold").as_double();
@@ -117,6 +120,7 @@ namespace axispose
             color_fy_ = msg->k[4];
             color_cx_ = msg->k[2];
             color_cy_ = msg->k[5];
+            color_frame_id_ = msg->header.frame_id;
             have_intrinsics_color_ = true;
             RCLCPP_INFO(this->get_logger(), "Got color camera intrinsics fx=%.2f fy=%.2f cx=%.2f cy=%.2f frame=%s", color_fx_, color_fy_, color_cx_, color_cy_, msg->header.frame_id.c_str());
             if (depth_aligner_)
@@ -160,12 +164,18 @@ namespace axispose
 
         // If we have color intrinsics, align depth to color image size and mask directly.
         cv::Mat depth_filtered;
+        double pc_fx = fx_, pc_fy = fy_, pc_cx = cx_, pc_cy = cy_;
         if (have_intrinsics_color_)
         {
             // align depth to mask (color) resolution
             cv::Mat aligned_depth = alignDepthToColor(depth_cv, mask_cv.cols, mask_cv.rows);
             depth_filtered = cv::Mat::zeros(aligned_depth.size(), aligned_depth.type());
             aligned_depth.copyTo(depth_filtered, mask_cv);
+            // Depth has been remapped to color image grid.
+            pc_fx = color_fx_;
+            pc_fy = color_fy_;
+            pc_cx = color_cx_;
+            pc_cy = color_cy_;
         }
         else
         {
@@ -179,7 +189,7 @@ namespace axispose
         }
 
         // convert to organized point cloud (one point per pixel, NaN for invalid) - now only depth is passed
-        auto organized = pc_processor_->depthMaskToPointCloud(depth_filtered, fx_, fy_, cx_, cy_);
+        auto organized = pc_processor_->depthMaskToPointCloud(depth_filtered, pc_fx, pc_fy, pc_cx, pc_cy);
         if (!organized || organized->empty())
         {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Empty organized point cloud after mask filtering");
@@ -221,11 +231,45 @@ namespace axispose
 
         // compute pose using valid_cloud
         geometry_msgs::msg::PoseStamped pose_msg;
+        std::string algo = algorithm_type_;
+        for (auto &c : algo)
+            c = static_cast<char>(std::tolower(c));
+        const bool run_gaussian = (algo == "gaussian");
+        const bool run_ceres = (algo == "ceres");
+        const bool run_ransac = (algo == "ransac" || algo == "sacline");
+
         if (benchmark_)
         {
-            if (use_sacline_)
+            if (run_gaussian || run_ceres)
             {
-                auto tup = benchmark_->run("pose_sacline", [this, &valid_cloud, &depth_msg]()
+                auto tup = benchmark_->run("pose_" + algo, [this, &valid_cloud, &mask_cv, &depth_msg, &algo]()
+                                           {
+                    geometry_msgs::msg::PoseStamped p;
+                    if (algo == "ceres") {
+                        p = this->computePoseCeres(valid_cloud, mask_cv, depth_msg->header.stamp);
+                    } else {
+                        p = this->computePoseGaussian(valid_cloud, mask_cv, depth_msg->header.stamp);
+                    }
+                    return std::make_tuple(p, static_cast<size_t>(valid_cloud->size())); }, [](const std::tuple<geometry_msgs::msg::PoseStamped, size_t> &t) -> std::vector<std::string>
+                                           {
+                    const auto &pose = std::get<0>(t).pose;
+                    size_t n = std::get<1>(t);
+                    std::vector<std::string> out;
+                    out.reserve(8);
+                    out.push_back(std::to_string(n));
+                    out.push_back(std::to_string(pose.position.x));
+                    out.push_back(std::to_string(pose.position.y));
+                    out.push_back(std::to_string(pose.position.z));
+                    out.push_back(std::to_string(pose.orientation.x));
+                    out.push_back(std::to_string(pose.orientation.y));
+                    out.push_back(std::to_string(pose.orientation.z));
+                    out.push_back(std::to_string(pose.orientation.w));
+                    return out; });
+                pose_msg = std::get<0>(tup);
+            }
+            else if (run_ransac)
+            {
+                auto tup = benchmark_->run("pose_ransac", [this, &valid_cloud, &depth_msg]()
                                            {
                     auto p = this->computePoseFromSACLine(valid_cloud, depth_msg->header.stamp);
                     return std::make_tuple(p, static_cast<size_t>(valid_cloud->size())); }, [](const std::tuple<geometry_msgs::msg::PoseStamped, size_t> &t) -> std::vector<std::string>
@@ -270,13 +314,17 @@ namespace axispose
         }
         else
         {
-            if (use_sacline_)
+            if (run_ceres)
+                pose_msg = computePoseCeres(valid_cloud, mask_cv, depth_msg->header.stamp);
+            else if (run_gaussian)
+                pose_msg = computePoseGaussian(valid_cloud, mask_cv, depth_msg->header.stamp);
+            else if (run_ransac)
                 pose_msg = computePoseFromSACLine(valid_cloud, depth_msg->header.stamp);
             else
                 pose_msg = computePoseFromCloud(valid_cloud, depth_msg->header.stamp);
         }
         pose_msg.header.stamp = depth_msg->header.stamp;
-        pose_msg.header.frame_id = frame_id_;
+        pose_msg.header.frame_id = have_intrinsics_color_ ? color_frame_id_ : frame_id_;
         pose_pub_->publish(pose_msg);
 
         // publish debug organized cloud
@@ -284,7 +332,7 @@ namespace axispose
         pcl::toROSMsg(*organized, cloud_msg);
         // pcl::toROSMsg(*valid_cloud, cloud_msg);
         cloud_msg.header.stamp = depth_msg->header.stamp;
-        cloud_msg.header.frame_id = frame_id_;
+        cloud_msg.header.frame_id = pose_msg.header.frame_id;
         if (!debug_ || debug_->enabled("debug_cloud"))
         {
             debug_cloud_pub_->publish(cloud_msg);
@@ -587,11 +635,163 @@ namespace axispose
         return pose;
     }
 
+    geometry_msgs::msg::PoseStamped PoseEstimate::computePoseGaussian(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const cv::Mat &mask_cv, const rclcpp::Time &stamp)
+    {
+        geometry_msgs::msg::PoseStamped pose;
+        (void)mask_cv;
+        (void)stamp;
+
+        axispose::GaussianMapSolver solver;
+        Eigen::Vector3f out_axis, out_point;
+        float out_radius = 0.05f;
+
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_ptr(new pcl::PointCloud<pcl::PointXYZ>(*cloud));
+        if (!solver.estimateAxis(cloud_ptr, out_axis, out_point, out_radius))
+        {
+            RCLCPP_WARN(this->get_logger(), "GaussianMapSolver failed");
+            return pose;
+        }
+
+        // Sanity-check direction against PCA axis to avoid occasional normal-space outliers.
+        Eigen::Vector4f centroid;
+        pcl::compute3DCentroid(*cloud_ptr, centroid);
+        Eigen::Matrix3f covariance;
+        pcl::computeCovarianceMatrixNormalized(*cloud_ptr, centroid, covariance);
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> eig(covariance);
+        Eigen::Vector3f pca_axis = eig.eigenvectors().col(2).normalized();
+        if (std::abs(out_axis.dot(pca_axis)) < std::cos(8.0 * M_PI / 180.0))
+        {
+            out_axis = pca_axis;
+        }
+
+        pose.pose.position.x = out_point.x();
+        pose.pose.position.y = out_point.y();
+        pose.pose.position.z = out_point.z();
+
+        // Keep convention consistent with PCA path: line direction is local X axis.
+        Eigen::Vector3d axis_x = out_axis.cast<double>().normalized();
+        Eigen::Vector3d up = Eigen::Vector3d::UnitY();
+        if (std::abs(axis_x.dot(up)) > 0.99)
+            up = Eigen::Vector3d::UnitZ();
+        Eigen::Vector3d axis_y = (up - up.dot(axis_x) * axis_x).normalized();
+        Eigen::Vector3d axis_z = axis_x.cross(axis_y).normalized();
+
+        Eigen::Matrix3d R;
+        R.col(0) = axis_x;
+        R.col(1) = axis_y;
+        R.col(2) = axis_z;
+        Eigen::Quaterniond q(R);
+        q.normalize();
+
+        pose.pose.orientation.x = q.x();
+        pose.pose.orientation.y = q.y();
+        pose.pose.orientation.z = q.z();
+        pose.pose.orientation.w = q.w();
+
+        return pose;
+    }
+
+    geometry_msgs::msg::PoseStamped PoseEstimate::computePoseCeres(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const cv::Mat &mask_cv, const rclcpp::Time &stamp)
+    {
+        geometry_msgs::msg::PoseStamped pose;
+        (void)stamp;
+
+        axispose::GaussianMapSolver solver;
+        Eigen::Vector3f out_axis, out_point;
+        float out_radius = 0.05f;
+
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_ptr(new pcl::PointCloud<pcl::PointXYZ>(*cloud));
+        if (!solver.estimateAxis(cloud_ptr, out_axis, out_point, out_radius))
+        {
+            RCLCPP_WARN(this->get_logger(), "GaussianMapSolver failed");
+            return pose;
+        }
+        (void)out_radius;
+
+        // Fit a 2D line from YOLO mask as supervision: A*u + B*v + C = 0.
+        std::vector<cv::Point> nz;
+        cv::findNonZero(mask_cv, nz);
+        if (nz.size() < 20)
+        {
+            RCLCPP_WARN(this->get_logger(), "Ceres skipped: not enough mask points (%zu)", nz.size());
+            return computePoseGaussian(cloud, mask_cv, stamp);
+        }
+
+        cv::Vec4f line;
+        cv::fitLine(nz, line, cv::DIST_L2, 0, 0.01, 0.01);
+        const double vx = static_cast<double>(line[0]);
+        const double vy = static_cast<double>(line[1]);
+        const double x0 = static_cast<double>(line[2]);
+        const double y0 = static_cast<double>(line[3]);
+        const double norm_v = std::hypot(vx, vy);
+        if (norm_v < 1e-8)
+        {
+            RCLCPP_WARN(this->get_logger(), "Ceres skipped: invalid fitted 2D line");
+            return computePoseGaussian(cloud, mask_cv, stamp);
+        }
+
+        Eigen::Vector3d line2d_abc;
+        line2d_abc << -vy, vx, (vy * x0 - vx * y0);
+        line2d_abc /= std::sqrt(line2d_abc.x() * line2d_abc.x() + line2d_abc.y() * line2d_abc.y());
+
+        Eigen::Vector3d d = out_axis.cast<double>().normalized();
+        Eigen::Vector3d p = out_point.cast<double>();
+        Eigen::Vector3d m = p.cross(d);
+
+        Eigen::Matrix3d K = Eigen::Matrix3d::Identity();
+        if (have_intrinsics_color_)
+        {
+            K(0, 0) = color_fx_;
+            K(1, 1) = color_fy_;
+            K(0, 2) = color_cx_;
+            K(1, 2) = color_cy_;
+        }
+        else
+        {
+            K(0, 0) = fx_;
+            K(1, 1) = fy_;
+            K(0, 2) = cx_;
+            K(1, 2) = cy_;
+        }
+
+        axispose::CeresJointOptimizer optimizer;
+        const bool ok = optimizer.optimizePose(d, m, cloud_ptr, K, line2d_abc, p, 12, 90, 3.0, 20.0);
+        if (!ok)
+        {
+            RCLCPP_WARN(this->get_logger(), "Ceres optimizer failed, fallback to Gaussian pose");
+            return computePoseGaussian(cloud, mask_cv, stamp);
+        }
+
+        // Keep position anchored to robust Gaussian axis point; use Ceres mainly for direction refinement.
+        Eigen::Vector3d optimized_point = p;
+
+        pose.pose.position.x = optimized_point.x();
+        pose.pose.position.y = optimized_point.y();
+        pose.pose.position.z = optimized_point.z();
+
+        // Keep convention consistent with PCA path: line direction is local X axis.
+        Eigen::Vector3d axis_x = d.normalized();
+        Eigen::Vector3d up = Eigen::Vector3d::UnitY();
+        if (std::abs(axis_x.dot(up)) > 0.99)
+            up = Eigen::Vector3d::UnitZ();
+        Eigen::Vector3d axis_y = (up - up.dot(axis_x) * axis_x).normalized();
+        Eigen::Vector3d axis_z = axis_x.cross(axis_y).normalized();
+
+        Eigen::Matrix3d R;
+        R.col(0) = axis_x;
+        R.col(1) = axis_y;
+        R.col(2) = axis_z;
+        Eigen::Quaterniond q(R);
+        q.normalize();
+
+        pose.pose.orientation.x = q.x();
+        pose.pose.orientation.y = q.y();
+        pose.pose.orientation.z = q.z();
+        pose.pose.orientation.w = q.w();
+
+        return pose;
+    }
+
 } // namespace axispose
-
-#include "rclcpp_components/register_node_macro.hpp"
-
-// Register the component with class_loader.
-// This acts as a sort of entry point, allowing the component to be discoverable when its library
-// is being loaded into a running process.
+#include <rclcpp_components/register_node_macro.hpp>
 RCLCPP_COMPONENTS_REGISTER_NODE(axispose::PoseEstimate)

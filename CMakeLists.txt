@@ -31,6 +31,7 @@ find_package(ament_index_cpp REQUIRED)
 find_package(TensorRT-YOLO REQUIRED)
 find_package(PCL REQUIRED)
 find_package(pcl_conversions REQUIRED)
+find_package(Ceres REQUIRED)
 
 ament_auto_find_build_dependencies()
 
@@ -96,10 +97,13 @@ add_library(PoseEstimate SHARED
   src/poseEstimate.cpp
   src/depth_aligner.cpp
   src/point_cloud_processor.cpp
+  src/gaussian_map_solver.cpp
+  src/ceres_joint_optimizer.cpp
 )
 target_link_libraries(PoseEstimate
   ${OpenCV_LIBS}
   ${PCL_LIBRARIES}
+  Ceres::ceres
 )
 ament_target_dependencies(PoseEstimate
   rclcpp
@@ -175,5 +179,20 @@ install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config/ DESTINATION share/${PROJECT_NAME}/config)
 install(DIRECTORY launch/ DESTINATION share/${PROJECT_NAME}/launch)
 
-
+add_executable(evaluate_pipelines 
+  src/evaluate_pipelines.cpp
+  src/gaussian_map_solver.cpp
+  src/ceres_joint_optimizer.cpp
+)
+target_link_libraries(evaluate_pipelines
+  ${OpenCV_LIBS}
+  ${PCL_LIBRARIES}
+  Ceres::ceres
+)
+ament_target_dependencies(evaluate_pipelines
+  Eigen3
+)
+install(TARGETS evaluate_pipelines
+  DESTINATION lib/${PROJECT_NAME}
+)
 ament_package()

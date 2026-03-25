@@ -19,16 +19,16 @@ def generate_launch_description():
     pkg_share = get_package_share_directory('axispose')
     pkg_directory = os.path.join(pkg_share, '..', '..', '..', '..')
 
-    # 默认图片目录在包内 image/rgb 和 image/depth
-    default_rgb = os.path.join(pkg_directory, 'image_tag', 'rgb')
-    default_depth = os.path.join(pkg_directory, 'image_tag', 'depth')
+    # 默认图片目录在包内 image1/rgb 和 image1/depth（真实数据）
+    default_rgb = os.path.join(pkg_directory, 'image1', 'rgb')
+    default_depth = os.path.join(pkg_directory, 'image1', 'depth')
     default_engine = os.path.join(
         pkg_directory, 'engine', 'occlusion.engine')
     default_statistic = os.path.join(
         pkg_directory, 'statistics')
 
-    # 参数文件
-    param_file = os.path.join(pkg_share, 'config', 'param.yaml')
+    # 参数文件：优先使用源码目录下 config/param.yaml，避免安装目录参数滞后
+    param_file = os.path.join(pkg_directory, 'config', 'param.yaml')
     # /home/jacy/project/final_design/axispose/image/depth
     # /home/jacy/Downloads/captured_img/captured_rgb
     # /home/jacy/Downloads/images_20251206/img
@@ -45,6 +45,8 @@ def generate_launch_description():
         'engine', default_value=default_engine, description='engine文件路径')
     statistic_directory_arg = DeclareLaunchArgument(
         'statistic_directory', default_value=default_statistic, description='统计信息文件路径')
+    algorithm_type_arg = DeclareLaunchArgument(
+        'algorithm_type', default_value='gaussian', description='pose algorithm type: pca|gaussian|ceres|sacline')
     # Composable node 描述
     container = ComposableNodeContainer(
         name='axispose_container',
@@ -66,7 +68,8 @@ def generate_launch_description():
                 plugin='axispose::PoseEstimate',
                 name='pose_estimate_component',
                 parameters=[param_file, {
-                    'statistics_directory_path': LaunchConfiguration('statistic_directory')
+                    'statistics_directory_path': LaunchConfiguration('statistic_directory'),
+                    'algorithm_type': LaunchConfiguration('algorithm_type')
                 }],
                 extra_arguments=[{'use_intra_process_comms': True}]
             ),
@@ -75,6 +78,7 @@ def generate_launch_description():
                 plugin='axispose::Visualization',
                 name='visualization_component',
                 parameters=[param_file, {
+                    'statistics_directory_path': LaunchConfiguration('statistic_directory'),
                     # default save dir is <statistic_directory>/vis so images are colocated with metrics
                     'save_dir': PathJoinSubstitution([LaunchConfiguration('statistic_directory'), 'vis'])
                 }],
@@ -101,6 +105,7 @@ def generate_launch_description():
         depth_dir_arg,
         engine_arg,
         statistic_directory_arg,
+        algorithm_type_arg,
         LogInfo(
             msg=["axispose: starting camera_driver component with params from ", param_file]),
         container

@@ -1,27 +1,25 @@
 /**:
   ros__parameters:
-    publish_rate: 2.0
+    publish_rate: 1.0
     frame_id: camera_color_optical_frame
     camera_name: d457
-    loop: true
-    voxel_leaf_size: 0.025
+    loop: false
+    voxel_leaf_size: 0.05
     sor_mean_k: 20.0
     sor_std_mul: 0.5
-    statistics_enabled: false
+    statistics_enabled: true
     use_sor: true
     use_sacline: false
-    sacline_distance_threshold: 0.1
+    algorithm_type: pca
     use_euclidean_cluster: true
-    cluster_mode: 2 # 0: closest to origin, 1: largest cluster, 2: RANSAC line inliers
+    sacline_distance_threshold: 0.1
+    cluster_mode: 2
     color_image_topic: /camera/color/image_raw
     depth_image_topic: /camera/depth/image_rect_raw
     color_camera_info_topic: /camera/color/camera_info
     depth_camera_info_topic: /camera/depth/camera_info
     mask_topic: /yolo/mask
-    # input_mode controls where image/camera_info come from:
-    #  - 'driver' (default): this CameraDriver publishes images and camera_info
-    #  - 'bag': do not publish images nor camera_info (playback from bag expected)
-    #  - 'caminfo_only': only publish camera_info from the driver, use bag for images
     input_mode: driver
-    # Debug flags: list of strings, e.g. ['debug_cloud','debug_clusters']
     debug_flags: ["debug_cloud"]
+    save_visualization: true
+    save_every_n: 1

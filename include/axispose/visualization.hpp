@@ -8,6 +8,7 @@
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
 #include <message_filters/sync_policies/approximate_time.h>
+#include <fstream>
 
 namespace axispose
 {
@@ -45,6 +46,12 @@ namespace axispose
         std::string save_dir_;
         int save_every_n_ = 1; // save every N frames (1 = every frame)
         uint64_t save_counter_ = 0;
+
+        // 2D line evaluation logging
+        bool line_eval_enabled_ = true;
+        std::string line_eval_csv_path_;
+        std::ofstream line_eval_ofs_;
+        uint64_t line_eval_counter_ = 0;
 
         // callback invoked with synchronized messages
         void syncCallback(const Image::ConstSharedPtr rgb_msg,

@@ -30,6 +30,8 @@
 #include "axispose/debug_manager.hpp"
 #include "axispose/point_cloud_processor.hpp"
 #include "axispose/depth_aligner.hpp"
+#include "axispose/gaussian_map_solver.hpp"
+#include "axispose/ceres_joint_optimizer.hpp"
 
 #include <memory>
 
@@ -66,6 +68,7 @@ namespace axispose
         // color intrinsics (used for alignment)
         std::atomic<bool> have_intrinsics_color_{false};
         double color_fx_{0.0}, color_fy_{0.0}, color_cx_{0.0}, color_cy_{0.0};
+        std::string color_frame_id_;
         double scale_x{1.0}, scale_y{1.0};
         std::string frame_id_ = "base_link";
 
@@ -104,8 +107,10 @@ namespace axispose
         void denoisePointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud);
         geometry_msgs::msg::PoseStamped computePoseFromCloud(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const rclcpp::Time &stamp);
         geometry_msgs::msg::PoseStamped computePoseFromSACLine(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const rclcpp::Time &stamp);
+        geometry_msgs::msg::PoseStamped computePoseGaussian(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const cv::Mat &mask_cv, const rclcpp::Time &stamp);
+        geometry_msgs::msg::PoseStamped computePoseCeres(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const cv::Mat &mask_cv, const rclcpp::Time &stamp);
+        std::string algorithm_type_ = "pca";
     };
 
 } // namespace axispose
-
-#endif // AXISPOSE_POSEESTIMATE_HPP_
+#endif

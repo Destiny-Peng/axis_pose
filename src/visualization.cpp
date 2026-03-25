@@ -13,6 +13,9 @@
 #include <ctime>
 #include <iomanip>
 #include <sstream>
+#include <limits>
+#include <cmath>
+#include <array>
 
 namespace axispose
 {
@@ -30,6 +33,7 @@ namespace axispose
         this->declare_parameter("save_visualization", false);
         this->declare_parameter("save_dir", std::string("statistics/vis"));
         this->declare_parameter("save_every_n", 1);
+        this->declare_parameter("line_eval_enabled", true);
 
         std::string mask_topic = this->get_parameter("mask_topic").as_string();
         std::string color_image_topic = this->get_parameter("color_image_topic").as_string();
@@ -40,6 +44,7 @@ namespace axispose
         save_annotated_ = this->get_parameter("save_visualization").as_bool();
         save_dir_ = this->get_parameter("save_dir").as_string();
         std::string stats_dir = this->get_parameter("statistics_directory_path").as_string();
+        line_eval_enabled_ = this->get_parameter("line_eval_enabled").as_bool();
         if (!stats_dir.empty())
         {
             try
@@ -50,6 +55,21 @@ namespace axispose
                     std::filesystem::create_directories(p);
                 save_dir_ = p.string();
                 RCLCPP_INFO(this->get_logger(), "Visualization: overridden save_dir -> %s (from statistics_directory_path)", save_dir_.c_str());
+
+                if (line_eval_enabled_)
+                {
+                    line_eval_csv_path_ = (std::filesystem::path(stats_dir) / "line2d_metrics.csv").string();
+                    line_eval_ofs_.open(line_eval_csv_path_, std::ios::out | std::ios::trunc);
+                    if (line_eval_ofs_.is_open())
+                    {
+                        line_eval_ofs_ << "frame_idx,timestamp_sec,timestamp_nsec,angle_err_deg,offset_err_px,valid\n";
+                        line_eval_ofs_.flush();
+                    }
+                    else
+                    {
+                        RCLCPP_WARN(this->get_logger(), "Visualization: failed to open line2d_metrics.csv at %s", line_eval_csv_path_.c_str());
+                    }
+                }
             }
             catch (const std::exception &e)
             {
@@ -74,6 +94,23 @@ namespace axispose
             {
                 RCLCPP_WARN(this->get_logger(), "Visualization: failed to create save_dir '%s': %s", save_dir_.c_str(), e.what());
                 save_annotated_ = false;
+            }
+
+            if (line_eval_enabled_ && line_eval_csv_path_.empty())
+            {
+                // Fall back to save_dir parent when statistics_directory_path is not provided.
+                std::filesystem::path fallback_dir = std::filesystem::path(save_dir_).parent_path();
+                if (fallback_dir.empty())
+                {
+                    fallback_dir = std::filesystem::current_path();
+                }
+                line_eval_csv_path_ = (fallback_dir / "line2d_metrics.csv").string();
+                line_eval_ofs_.open(line_eval_csv_path_, std::ios::out | std::ios::trunc);
+                if (line_eval_ofs_.is_open())
+                {
+                    line_eval_ofs_ << "frame_idx,timestamp_sec,timestamp_nsec,angle_err_deg,offset_err_px,valid\n";
+                    line_eval_ofs_.flush();
+                }
             }
         }
 
@@ -236,6 +273,9 @@ namespace axispose
         cv::addWeighted(color_mask, alpha, vis, 1.0 - alpha, 0.0, vis);
 
         // draw center and axis line if projection succeeded
+        cv::Point2f eval_dir_pt;
+        bool eval_have_dir = false;
+
         if (okc)
         {
             cv::circle(vis, pc, 6, cv::Scalar(0, 0, 255), -1);
@@ -269,6 +309,8 @@ namespace axispose
 
             if (have_dir)
             {
+                eval_dir_pt = dir_pt;
+                eval_have_dir = true;
                 // build a line through pc in direction (dir_pt - pc) and clip to image bounds
                 cv::Point2f d = dir_pt - pc;
                 const int W = vis.cols;
@@ -351,6 +393,91 @@ namespace axispose
                     }
                 }
             }
+        }
+
+        // Optional quantitative 2D evaluation: compare projected 3D axis line vs fitted mask line.
+        if (line_eval_enabled_ && line_eval_ofs_.is_open())
+        {
+            double angle_err_deg = std::numeric_limits<double>::quiet_NaN();
+            double offset_err_px = std::numeric_limits<double>::quiet_NaN();
+            int valid_eval = 0;
+
+            std::vector<cv::Point> mask_pts;
+            cv::findNonZero(mask_cv, mask_pts);
+            if (mask_pts.size() >= 20)
+            {
+                cv::Vec4f mask_line;
+                cv::fitLine(mask_pts, mask_line, cv::DIST_L2, 0, 0.01, 0.01);
+                cv::Point2f pm(mask_line[2], mask_line[3]);
+                cv::Point2f vm(mask_line[0], mask_line[1]);
+
+                if (okc)
+                {
+                    std::vector<cv::Point2f> proj_samples;
+                    proj_samples.reserve(10);
+                    const std::array<double, 10> scales = {-40.0, -20.0, -10.0, -5.0, -2.0, 2.0, 5.0, 10.0, 20.0, 40.0};
+                    for (double s : scales)
+                    {
+                        geometry_msgs::msg::Point ps;
+                        ps.x = center.x + axis_dir_e.x() * axis_length_ * s;
+                        ps.y = center.y + axis_dir_e.y() * axis_length_ * s;
+                        ps.z = center.z + axis_dir_e.z() * axis_length_ * s;
+                        cv::Point2f pp;
+                        if (projectPoint(ps, *caminfo_to_use, pp))
+                            proj_samples.push_back(pp);
+                    }
+
+                    cv::Point2f ve;
+                    if (proj_samples.size() >= 2)
+                    {
+                        ve = proj_samples.back() - proj_samples.front();
+                    }
+                    else if (eval_have_dir)
+                    {
+                        ve = eval_dir_pt - pc;
+                    }
+                    else
+                    {
+                        ve = cv::Point2f(0.0f, 0.0f);
+                    }
+
+                    const float ne = std::sqrt(ve.x * ve.x + ve.y * ve.y);
+                    const float nm = std::sqrt(vm.x * vm.x + vm.y * vm.y);
+                    if (ne > 1e-6f && nm > 1e-6f)
+                    {
+                        cv::Point2f ve_n(ve.x / ne, ve.y / ne);
+                        cv::Point2f vm_n(vm.x / nm, vm.y / nm);
+                        float dot = std::abs(ve_n.x * vm_n.x + ve_n.y * vm_n.y);
+                        dot = std::max(-1.0f, std::min(1.0f, dot));
+                        angle_err_deg = std::acos(dot) * 180.0 / M_PI;
+
+                        // Signed normal form for projected estimated line through center with direction ve_n.
+                        const double A = -static_cast<double>(ve_n.y);
+                        const double B = static_cast<double>(ve_n.x);
+                        const double C = -(A * pc.x + B * pc.y);
+                        offset_err_px = std::abs(A * pm.x + B * pm.y + C);
+                        valid_eval = 1;
+                    }
+                }
+            }
+
+            line_eval_ofs_ << line_eval_counter_ << ","
+                           << pose_msg->header.stamp.sec << ","
+                           << pose_msg->header.stamp.nanosec << ",";
+            if (valid_eval)
+            {
+                line_eval_ofs_ << angle_err_deg << "," << offset_err_px;
+            }
+            else
+            {
+                line_eval_ofs_ << ",";
+            }
+            line_eval_ofs_ << "," << valid_eval << "\n";
+            if ((save_counter_ % 10) == 0)
+            {
+                line_eval_ofs_.flush();
+            }
+            line_eval_counter_++;
         }
 
         // convert back to sensor_msgs::Image

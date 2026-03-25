@@ -1,0 +1,48 @@
+# Axispose 四算法原理与实现
+
+## 1. PCA（基线）
+- 原理：对分割点云做协方差分解，最大特征值对应主轴方向。
+- 适用：速度快、实现简单，作为稳定基线。
+- 实现入口：`PoseEstimate::computePoseFromCloud`
+- 代码位置：
+  - `src/poseEstimate.cpp`
+
+## 2. RANSAC（线模型）
+- 原理：在点云中随机采样拟合直线模型（SACMODEL_LINE），通过内点最大化获得主轴。
+- 适用：有离群点时比纯PCA更鲁棒。
+- 实现入口：`PoseEstimate::computePoseFromSACLine`
+- 代码位置：
+  - `src/poseEstimate.cpp`
+  - 点云预处理中 cluster+rasa c内点逻辑：`PoseEstimate::denoisePointCloud`
+
+## 3. Gaussian（法向空间）
+- 原理：圆柱面法向量在高斯球上落在大圆；通过法向协方差最小特征向量求轴向。
+- 关键实现：
+  - 法向估计（organized 用积分法，unorganized 用KNN）
+  - 两阶段求解：全体法向初解 + 正交约束筛选后复解
+  - 点位估计：轴点用质心锚定，半径用径向距离中位数估计
+- 实现入口：`PoseEstimate::computePoseGaussian`
+- 代码位置：
+  - `src/gaussian_map_solver.cpp`
+  - `include/axispose/gaussian_map_solver.hpp`
+  - `src/poseEstimate.cpp`
+
+## 4. Ceres（3D+2D联合优化）
+- 原理：
+  - 3D 约束：点到线残差（Plücker 表达）
+  - 2D 约束：mask 拟合中心线 `A*u + B*v + C = 0`，约束反投影线落在中心线上
+  - 位置先验：约束线位置靠近初始轴点，避免“平行不重合”
+- 提速策略：
+  - 点采样（限制参与优化点数）
+  - 降低迭代次数
+  - 使用轻量线残差替代距离变换插值残差
+- 实现入口：`PoseEstimate::computePoseCeres`
+- 代码位置：
+  - `src/ceres_joint_optimizer.cpp`
+  - `include/axispose/ceres_joint_optimizer.hpp`
+  - `src/poseEstimate.cpp`
+
+## 算法切换统一规则
+- 参数：`algorithm_type`
+- 支持值：`pca` / `ransac` / `gaussian` / `ceres`
+- 切换位置：`PoseEstimate::syncCallback`（`src/poseEstimate.cpp`）
