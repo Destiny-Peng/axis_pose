@@ -45,8 +45,9 @@ def generate_launch_description():
         'engine', default_value=default_engine, description='engine文件路径')
     statistic_directory_arg = DeclareLaunchArgument(
         'statistic_directory', default_value=default_statistic, description='统计信息文件路径')
-    algorithm_type_arg = DeclareLaunchArgument(
-        'algorithm_type', default_value='gaussian', description='pose algorithm type: pca|gaussian|ceres|sacline')
+    pose_plugin_arg = DeclareLaunchArgument(
+        'pose_plugin', default_value='axispose::PoseEstimatePCA',
+        description='pose component plugin: axispose::PoseEstimatePCA|PoseEstimateRANSAC|PoseEstimateGaussian|PoseEstimateCeres')
     # Composable node 描述
     container = ComposableNodeContainer(
         name='axispose_container',
@@ -65,11 +66,10 @@ def generate_launch_description():
             ),
             ComposableNode(
                 package='axispose',
-                plugin='axispose::PoseEstimate',
+                plugin=LaunchConfiguration('pose_plugin'),
                 name='pose_estimate_component',
                 parameters=[param_file, {
-                    'statistics_directory_path': LaunchConfiguration('statistic_directory'),
-                    'algorithm_type': LaunchConfiguration('algorithm_type')
+                    'statistics_directory_path': LaunchConfiguration('statistic_directory')
                 }],
                 extra_arguments=[{'use_intra_process_comms': True}]
             ),
@@ -105,7 +105,7 @@ def generate_launch_description():
         depth_dir_arg,
         engine_arg,
         statistic_directory_arg,
-        algorithm_type_arg,
+        pose_plugin_arg,
         LogInfo(
             msg=["axispose: starting camera_driver component with params from ", param_file]),
         container

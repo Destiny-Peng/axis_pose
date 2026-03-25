@@ -1,32 +1,41 @@
-#!/bin/bash
-cd /home/jacy/project/final_design/axispose
-source install/setup.bash
-P=/home/jacy/project/final_design/axispose/config/param.yaml
+#!/usr/bin/env bash
+set -eo pipefail
 
-sed -i 's/loop: true/loop: false/' $P
-sed -i 's/use_sacline: true/use_sacline: false/' $P
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${ROOT_DIR}/install/setup.bash"
+
+LAUNCH_FILE="${ROOT_DIR}/launch/launch.py"
+
+plugin_for_alg() {
+    local alg="$1"
+    case "$alg" in
+        gaussian) echo "axispose::PoseEstimateGaussian" ;;
+        ceres) echo "axispose::PoseEstimateCeres" ;;
+        *) return 1 ;;
+    esac
+}
 
 run_method() {
     local method_name=$1
-    local out_dir="statistics/${method_name}"
+    local out_dir="${ROOT_DIR}/statistics/${method_name}"
     local metrics_csv="${out_dir}/metrics.csv"
+    local plugin
+    plugin="$(plugin_for_alg "${method_name}")"
     
     echo "=== RUNNING NODE FOR ${method_name^^} ==="
-    sed -i "s/algorithm_type: .*/algorithm_type: ${method_name}/" $P
-    # clean old metric
-    rm -rf ${out_dir}
-    mkdir -p ${out_dir}
+    rm -rf "${out_dir}"
+    mkdir -p "${out_dir}"
     
-    ros2 launch axispose launch.py statistic_directory:=${out_dir} &
+    ros2 launch "${LAUNCH_FILE}" pose_plugin:="${plugin}" statistic_directory:="${out_dir}" &
     ROS_PID=$!
     
-    # Wait strictly for camera to finish reading the 51 frames
-    sleep 35
+    # Rate=1.0, around 50 frames. Keep buffer for startup and shutdown.
+    sleep 65
     kill -INT $ROS_PID
     wait $ROS_PID 2>/dev/null
     
     echo "=== EVALUATING ${method_name^^} ==="
-    ./tools/run_full_eval.sh image_tag/rgb/ config/d457_color.yaml 0.05 ${metrics_csv} ${out_dir}
+    ./tools/run_full_eval.sh image_tag/rgb/ config/d457_color.yaml 0.05 "${metrics_csv}" "${out_dir}"
 }
 
 run_method "gaussian"

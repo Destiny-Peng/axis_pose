@@ -7,24 +7,21 @@ namespace axispose
 
     DepthAligner::DepthAligner() {}
 
-    void DepthAligner::setDepthIntrinsics(double fx, double fy, double cx, double cy)
+    cv::Mat DepthAligner::align(const cv::Mat &depth,
+                                const cv::Mat &depth_camera_matrix,
+                                const cv::Mat &color_camera_matrix,
+                                int color_width,
+                                int color_height) const
     {
-        d_fx_ = fx;
-        d_fy_ = fy;
-        d_cx_ = cx;
-        d_cy_ = cy;
-    }
+        const double d_fx = depth_camera_matrix.at<double>(0, 0);
+        const double d_fy = depth_camera_matrix.at<double>(1, 1);
+        const double d_cx = depth_camera_matrix.at<double>(0, 2);
+        const double d_cy = depth_camera_matrix.at<double>(1, 2);
+        const double c_fx = color_camera_matrix.at<double>(0, 0);
+        const double c_fy = color_camera_matrix.at<double>(1, 1);
+        const double c_cx = color_camera_matrix.at<double>(0, 2);
+        const double c_cy = color_camera_matrix.at<double>(1, 2);
 
-    void DepthAligner::setColorIntrinsics(double fx, double fy, double cx, double cy)
-    {
-        c_fx_ = fx;
-        c_fy_ = fy;
-        c_cx_ = cx;
-        c_cy_ = cy;
-    }
-
-    cv::Mat DepthAligner::align(const cv::Mat &depth, int color_width, int color_height) const
-    {
         cv::Mat aligned = cv::Mat::zeros(color_height, color_width, CV_16U);
 
         bool depth_is_float = (depth.type() == CV_32F);
@@ -52,14 +49,14 @@ namespace axispose
                 }
 
                 // Back-project to 3D in depth camera frame
-                double X = (static_cast<double>(u) - d_cx_) * depth_val_m / d_fx_;
-                double Y = (static_cast<double>(v) - d_cy_) * depth_val_m / d_fy_;
+                double X = (static_cast<double>(u) - d_cx) * depth_val_m / d_fx;
+                double Y = (static_cast<double>(v) - d_cy) * depth_val_m / d_fy;
                 double Z = depth_val_m;
 
                 if (Z <= 0.0)
                     continue;
-                int u_c = static_cast<int>(std::round((X * c_fx_ / Z) + c_cx_));
-                int v_c = static_cast<int>(std::round((Y * c_fy_ / Z) + c_cy_));
+                int u_c = static_cast<int>(std::round((X * c_fx / Z) + c_cx));
+                int v_c = static_cast<int>(std::round((Y * c_fy / Z) + c_cy));
 
                 if (u_c < 0 || u_c >= color_width || v_c < 0 || v_c >= color_height)
                     continue;

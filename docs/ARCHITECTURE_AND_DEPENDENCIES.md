@@ -1,26 +1,48 @@
 # 项目架构、作业流程与依赖文件清单
 
 ## 一、整体架构
+
 ### 1. 节点级流程
-1. `CameraDriver`：读取离线图像目录并发布 RGB/Depth/CameraInfo
-2. `SegmentNode`：YOLO 分割，输出 mask
-3. `PoseEstimate`：点云构建、去噪、四算法位姿求解、输出 `/shaft/pose`
-4. `Visualization`：叠加可视化、保存图片、记录 2D 线评估 CSV
+1. `CameraDriver`：读取离线目录并发布 RGB/Depth/CameraInfo。
+2. `SegmentNode`：运行分割模型并发布 mask。
+3. `PoseEstimate*`：点云构建、去噪、位姿求解并发布 `/shaft/pose`。
+4. `Visualization`：叠加可视化、保存图像、记录 `line2d_metrics.csv`。
 
-### 2. launch 入口
-- `launch/launch.py`
-- 通过 `algorithm_type` 切换 `pca/ransac/gaussian/ceres`
+### 2. PoseEstimate 的 OOP 解耦（当前版本）
+- 公共基类：`PoseEstimateBase`（统一订阅、预处理、评测记录、发布）。
+- 独立算法节点：
+   - `PoseEstimatePCA`
+   - `PoseEstimateRANSAC`
+   - `PoseEstimateGaussian`
+   - `PoseEstimateCeres`
+- 每个算法节点作为独立 ROS2 组件注册，可在 launch 中直接更换组件插件，不再依赖运行时 `if/else` 切分算法。
 
-## 二、作业流程（推荐）
-1. 准备输入目录：`image1/rgb` + `image1/depth`
-2. 执行四算法脚本：`evaluate_4_methods.sh`
+### 3. launch 入口
+- 通用入口：`launch/launch.py`
+   - 通过 `pose_plugin` 选择算法组件插件。
+- 便捷入口：
+   - `launch/launch_pca.py`
+   - `launch/launch_ransac.py`
+   - `launch/launch_gaussian.py`
+   - `launch/launch_ceres.py`
+
+## 二、参数管理策略
+
+- 主要运行参数统一在 `config/param.yaml`。
+- 脚本层只保留必要的运行编排参数（输入目录、输出目录、插件映射）。
+- 评测超时默认读取 `config/param.yaml` 中 `evaluation_timeout_seconds`（当前值 65）。
+
+## 三、作业流程（推荐）
+
+1. 准备输入目录：`image1/rgb` 与 `image1/depth`。
+2. 运行四算法脚本：`evaluate_4_methods.sh`。
 3. 查看每算法目录中的：
-   - `metrics.csv`
-   - `line2d_metrics.csv`
-   - `line2d_summary.csv`
-4. 对比耗时与 2D 误差指标
+    - `metrics.csv`
+    - `line2d_metrics.csv`
+    - `line2d_summary.csv`
+4. 横向比较耗时与 2D 指标（角度、偏移）。
 
-## 三、项目实际使用的关键源码（可用于清理无效部分）
+## 四、项目核心源码清单
 
 ### C++ 源文件（核心）
 - `src/driver.cpp`
@@ -44,21 +66,19 @@
 - `include/axispose/benchmark.hpp`
 - `include/axispose/debug_manager.hpp`
 
-### Python 工具（评估相关）
+### 评估工具
+- `evaluate_4_methods.sh`
 - `tools/evaluate_line2d.py`
-- `tools/run_full_eval.sh`
-- `tools/extract_groundtruth.py`
-- `tools/gt_ingest.py`
-- `tools/evaluate.py`
 
-## 四、构建系统中参与编译的目标（来自 CMake）
+## 五、构建目标（CMake）
+
 - `CameraDriver`（组件库）
 - `SegmentNode`（组件库）
-- `PoseEstimate`（组件库）
+- `PoseEstimate`（组件库，包含 4 个算法组件插件）
 - `Visualization`（组件库）
-- `evaluate_pipelines`（测试可执行）
 
-## 五、可优先检查的潜在冗余区域
-- `src_1/` 目录（历史副本）
-- 旧统计目录与历史脚本（不影响运行但体积大）
-- 非当前评估链路使用的临时脚本
+## 六、优先可清理区域
+
+- `src_1/` 历史副本目录
+- 历史统计输出目录（体积大）
+- 已淘汰评估脚本与临时脚本

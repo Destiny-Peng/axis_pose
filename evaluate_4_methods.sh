@@ -9,6 +9,15 @@ RGB_DIR="${1:-${ROOT_DIR}/image1/rgb}"
 DEPTH_DIR="${2:-${ROOT_DIR}/image1/depth}"
 OUT_ROOT="${3:-${ROOT_DIR}/statistics/eval4_$(date +%Y%m%d_%H%M%S)}"
 LAUNCH_FILE="${ROOT_DIR}/launch/launch.py"
+PARAM_FILE="${ROOT_DIR}/config/param.yaml"
+
+TIMEOUT_DEFAULT="65"
+if [[ -f "${PARAM_FILE}" ]]; then
+  timeout_from_param="$(awk -F': ' '/evaluation_timeout_seconds:/{print $2; exit}' "${PARAM_FILE}" | tr -d ' ')"
+  if [[ -n "${timeout_from_param}" ]]; then
+    TIMEOUT_DEFAULT="${timeout_from_param}"
+  fi
+fi
 
 if [[ ! -d "${RGB_DIR}" || ! -d "${DEPTH_DIR}" ]]; then
   echo "ERROR: rgb/depth directories not found"
@@ -21,24 +30,34 @@ mkdir -p "${OUT_ROOT}"
 
 declare -a ALGS=("pca" "ransac" "gaussian" "ceres")
 
+plugin_for_alg() {
+  local alg="$1"
+  case "$alg" in
+    pca) echo "axispose::PoseEstimatePCA" ;;
+    ransac) echo "axispose::PoseEstimateRANSAC" ;;
+    gaussian) echo "axispose::PoseEstimateGaussian" ;;
+    ceres) echo "axispose::PoseEstimateCeres" ;;
+    *) return 1 ;;
+  esac
+}
+
 run_one() {
   local alg="$1"
   local out_dir="${OUT_ROOT}/${alg}"
-  local timeout_s=110
-  if [[ "${alg}" == "ceres" ]]; then
-    timeout_s=150
-  fi
+  local timeout_s="${TIMEOUT_DEFAULT}"
+  local plugin
+  plugin="$(plugin_for_alg "${alg}")"
 
   mkdir -p "${out_dir}"
   echo "======================================"
-  echo "[RUN] algorithm=${alg} out=${out_dir}"
+  echo "[RUN] algorithm=${alg} plugin=${plugin} out=${out_dir}"
   echo "======================================"
 
   set +e
   timeout -s INT "${timeout_s}"s ros2 launch "${LAUNCH_FILE}" \
     rgb_dir:="${RGB_DIR}" \
     depth_dir:="${DEPTH_DIR}" \
-    algorithm_type:="${alg}" \
+    pose_plugin:="${plugin}" \
     statistic_directory:="${out_dir}"
   local rc=$?
   set -e

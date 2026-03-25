@@ -8,20 +8,28 @@
 namespace axispose
 {
 
+    struct PointCloudDenoiseOptions
+    {
+        double voxel_leaf_size{0.05};
+        bool use_sor{true};
+        int sor_mean_k{50};
+        double sor_std_mul{1.0};
+        bool use_euclidean_cluster{true};
+        int cluster_mode{0}; // 0: closest to origin, 1: largest cluster, 2: max RANSAC inliers
+        double sacline_distance_threshold{0.05};
+    };
+
     class PointCloudProcessor
     {
     public:
         PointCloudProcessor();
 
-        // Convert organized depth (CV_16U mm or CV_32F meters) to organized pcl cloud using intrinsics
-        pcl::PointCloud<pcl::PointXYZ>::Ptr depthMaskToPointCloud(const cv::Mat &depth, double fx, double fy, double cx, double cy) const;
+        // Convert organized depth (CV_16U mm or CV_32F meters) to organized pcl cloud using K matrix.
+        pcl::PointCloud<pcl::PointXYZ>::Ptr depthMaskToPointCloud(const cv::Mat &depth, const cv::Mat &camera_matrix) const;
 
-        // Simple denoise: voxel grid + statistical outlier removal
+        // Full denoise pipeline: voxel + SOR + optional cluster filtering.
         void denoisePointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
-                               double voxel_leaf_size,
-                               bool use_sor,
-                               int sor_mean_k,
-                               double sor_std_mul) const;
+                               const PointCloudDenoiseOptions &options) const;
     };
 
 } // namespace axispose

@@ -5,11 +5,16 @@
 
 ## 功能
 - 在相同输入下依次运行四种算法：`pca/ransac/gaussian/ceres`
-- 每种算法通过 launch 启动完整流程
+- 每种算法通过切换 `pose_plugin` 启动独立算法节点
 - 输出：
   - `metrics.csv`（耗时与位姿统计）
   - `line2d_metrics.csv`（每帧2D线误差）
   - `line2d_summary.csv`（2D线误差汇总）
+
+## 参数来源
+- 主要运行参数来自：`config/param.yaml`
+- 评测超时默认读取：`evaluation_timeout_seconds`（当前建议 65 秒）
+- 脚本参数仅用于覆盖输入目录与输出目录
 
 ## 用法
 ```bash

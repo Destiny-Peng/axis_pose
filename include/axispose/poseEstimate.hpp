@@ -34,20 +34,34 @@
 #include "axispose/ceres_joint_optimizer.hpp"
 
 #include <memory>
+#include <atomic>
 
 namespace axispose
 {
 
-    class PoseEstimate : public rclcpp::Node
+    class PoseEstimateBase : public rclcpp::Node
     {
     public:
-        explicit PoseEstimate(const rclcpp::NodeOptions &options = rclcpp::NodeOptions());
+        explicit PoseEstimateBase(const std::string &node_name, const rclcpp::NodeOptions &options = rclcpp::NodeOptions());
+        virtual ~PoseEstimateBase() = default;
 
-    private:
+    protected:
         using Image = sensor_msgs::msg::Image;
         using CameraInfo = sensor_msgs::msg::CameraInfo;
         using ApproxSyncPolicy = message_filters::sync_policies::ApproximateTime<Image, Image>;
 
+        virtual geometry_msgs::msg::PoseStamped computePoseByAlgorithm(
+            pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud,
+            const cv::Mat &mask_cv,
+            const rclcpp::Time &stamp) = 0;
+        virtual std::string benchmarkLabel() const = 0;
+
+        geometry_msgs::msg::PoseStamped computePoseFromCloud(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const rclcpp::Time &stamp);
+        geometry_msgs::msg::PoseStamped computePoseFromSACLine(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const rclcpp::Time &stamp);
+        geometry_msgs::msg::PoseStamped computePoseGaussian(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const cv::Mat &mask_cv, const rclcpp::Time &stamp);
+        geometry_msgs::msg::PoseStamped computePoseCeres(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const cv::Mat &mask_cv, const rclcpp::Time &stamp);
+
+    private:
         // Subscribers and synchronizer
         message_filters::Subscriber<Image> depth_sub_;
         message_filters::Subscriber<Image> mask_sub_;
@@ -60,16 +74,12 @@ namespace axispose
         rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_cloud_pub_;
 
-        // Intrinsics
-        std::atomic<bool> have_intrinsics_{false};
-        // depth intrinsics (used for point cloud conversion)
+        // Intrinsics (stored as OpenCV camera matrices for readability and consistency).
         std::atomic<bool> have_intrinsics_depth_{false};
-        double fx_{0.0}, fy_{0.0}, cx_{0.0}, cy_{0.0};
-        // color intrinsics (used for alignment)
+        cv::Mat depth_camera_matrix_ = cv::Mat::eye(3, 3, CV_64F);
         std::atomic<bool> have_intrinsics_color_{false};
-        double color_fx_{0.0}, color_fy_{0.0}, color_cx_{0.0}, color_cy_{0.0};
+        cv::Mat color_camera_matrix_ = cv::Mat::eye(3, 3, CV_64F);
         std::string color_frame_id_;
-        double scale_x{1.0}, scale_y{1.0};
         std::string frame_id_ = "base_link";
 
         // Parameters
@@ -80,10 +90,8 @@ namespace axispose
         std::string statistics_directory_path_;
         // Benchmark / metrics logger
         std::unique_ptr<AlgorithmBenchmark> benchmark_;
-        pcl::ModelCoefficients::Ptr coefficients = std::make_shared<pcl::ModelCoefficients>();
         bool statistics_enabled_ = true;
         bool use_sor_ = true;
-        bool use_sacline_ = true;
         bool use_euclidean_cluster_ = true;
         int cluster_mode_ = 0;                     // 0: closest to origin, 1: largest cluster, 2: RANSAC line inliers
         double sacline_distance_threshold_ = 0.05; // meters
@@ -105,11 +113,58 @@ namespace axispose
         // align depth image to color image size using intrinsics
         cv::Mat alignDepthToColor(const cv::Mat &depth, int color_width, int color_height);
         void denoisePointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud);
-        geometry_msgs::msg::PoseStamped computePoseFromCloud(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const rclcpp::Time &stamp);
-        geometry_msgs::msg::PoseStamped computePoseFromSACLine(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const rclcpp::Time &stamp);
-        geometry_msgs::msg::PoseStamped computePoseGaussian(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const cv::Mat &mask_cv, const rclcpp::Time &stamp);
-        geometry_msgs::msg::PoseStamped computePoseCeres(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const cv::Mat &mask_cv, const rclcpp::Time &stamp);
-        std::string algorithm_type_ = "pca";
+    };
+
+    class PoseEstimatePCA : public PoseEstimateBase
+    {
+    public:
+        explicit PoseEstimatePCA(const rclcpp::NodeOptions &options = rclcpp::NodeOptions());
+
+    protected:
+        geometry_msgs::msg::PoseStamped computePoseByAlgorithm(
+            pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud,
+            const cv::Mat &mask_cv,
+            const rclcpp::Time &stamp) override;
+        std::string benchmarkLabel() const override;
+    };
+
+    class PoseEstimateRANSAC : public PoseEstimateBase
+    {
+    public:
+        explicit PoseEstimateRANSAC(const rclcpp::NodeOptions &options = rclcpp::NodeOptions());
+
+    protected:
+        geometry_msgs::msg::PoseStamped computePoseByAlgorithm(
+            pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud,
+            const cv::Mat &mask_cv,
+            const rclcpp::Time &stamp) override;
+        std::string benchmarkLabel() const override;
+    };
+
+    class PoseEstimateGaussian : public PoseEstimateBase
+    {
+    public:
+        explicit PoseEstimateGaussian(const rclcpp::NodeOptions &options = rclcpp::NodeOptions());
+
+    protected:
+        geometry_msgs::msg::PoseStamped computePoseByAlgorithm(
+            pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud,
+            const cv::Mat &mask_cv,
+            const rclcpp::Time &stamp) override;
+        std::string benchmarkLabel() const override;
+    };
+
+    class PoseEstimateCeres : public PoseEstimateBase
+    {
+    public:
+        explicit PoseEstimateCeres(const rclcpp::NodeOptions &options = rclcpp::NodeOptions());
+
+    protected:
+        geometry_msgs::msg::PoseStamped computePoseByAlgorithm(
+            pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud,
+            const cv::Mat &mask_cv,
+            const rclcpp::Time &stamp) override;
+        std::string benchmarkLabel() const override;
     };
 
 } // namespace axispose

@@ -1,19 +1,17 @@
 #include "axispose/poseEstimate.hpp"
 #include "axispose/debug_manager.hpp"
-
 #include <pcl/common/centroid.h>
 #include <pcl/common/eigen.h>
 #include <Eigen/Dense>
 #include <cmath>
 #include <sstream>
 #include <cstdint>
-#include <cctype>
 #include <tuple>
 
 namespace axispose
 {
 
-    PoseEstimate::PoseEstimate(const rclcpp::NodeOptions &options) : rclcpp::Node("pose_estimate", options)
+    PoseEstimateBase::PoseEstimateBase(const std::string &node_name, const rclcpp::NodeOptions &options) : rclcpp::Node(node_name, options)
     {
         // parameters
         this->declare_parameter("depth_image_topic", std::string("/camera/depth/image_raw"));
@@ -24,8 +22,6 @@ namespace axispose
         this->declare_parameter("sor_mean_k", sor_mean_k_);
         this->declare_parameter("sor_std_mul", sor_std_mul_);
         this->declare_parameter("use_sor", use_sor_);
-        this->declare_parameter("use_sacline", use_sacline_);
-        this->declare_parameter("algorithm_type", algorithm_type_);
         this->declare_parameter("use_euclidean_cluster", use_euclidean_cluster_);
         this->declare_parameter("cluster_mode", cluster_mode_); // 0: closest to origin, 1: largest cluster, 2: RANSAC line inliers
         this->declare_parameter("sacline_distance_threshold", sacline_distance_threshold_);
@@ -44,8 +40,6 @@ namespace axispose
         statistics_directory_path_ = this->get_parameter("statistics_directory_path").as_string();
         statistics_enabled_ = this->get_parameter("statistics_enabled").as_bool();
         use_sor_ = this->get_parameter("use_sor").as_bool();
-        use_sacline_ = this->get_parameter("use_sacline").as_bool();
-        algorithm_type_ = this->get_parameter("algorithm_type").as_string();
         use_euclidean_cluster_ = this->get_parameter("use_euclidean_cluster").as_bool();
         cluster_mode_ = this->get_parameter("cluster_mode").as_int();
         sacline_distance_threshold_ = this->get_parameter("sacline_distance_threshold").as_double();
@@ -58,15 +52,15 @@ namespace axispose
         mask_sub_.subscribe(this, mask_topic, qos.get_rmw_qos_profile());
 
         sync_ = std::make_shared<message_filters::Synchronizer<ApproxSyncPolicy>>(ApproxSyncPolicy(10), depth_sub_, mask_sub_);
-        sync_->registerCallback(&PoseEstimate::syncCallback, this);
+        sync_->registerCallback(&PoseEstimateBase::syncCallback, this);
 
         // subscribe to color and depth camera_info topics separately
         camera_info_color_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
             color_camera_info_topic, qos,
-            std::bind(&PoseEstimate::cameraInfoColorCallback, this, std::placeholders::_1));
+            std::bind(&PoseEstimateBase::cameraInfoColorCallback, this, std::placeholders::_1));
         camera_info_depth_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
             depth_camera_info_topic, qos,
-            std::bind(&PoseEstimate::cameraInfoDepthCallback, this, std::placeholders::_1));
+            std::bind(&PoseEstimateBase::cameraInfoDepthCallback, this, std::placeholders::_1));
 
         pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/shaft/pose", 10);
         debug_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/shaft/debug_cloud", 1);
@@ -93,44 +87,45 @@ namespace axispose
         }
     }
 
-    void PoseEstimate::cameraInfoDepthCallback(const CameraInfo::SharedPtr msg)
+    void PoseEstimateBase::cameraInfoDepthCallback(const CameraInfo::SharedPtr msg)
     {
         if (!have_intrinsics_depth_)
         {
-            fx_ = msg->k[0];
-            fy_ = msg->k[4];
-            cx_ = msg->k[2];
-            cy_ = msg->k[5];
+            depth_camera_matrix_.at<double>(0, 0) = msg->k[0];
+            depth_camera_matrix_.at<double>(1, 1) = msg->k[4];
+            depth_camera_matrix_.at<double>(0, 2) = msg->k[2];
+            depth_camera_matrix_.at<double>(1, 2) = msg->k[5];
             frame_id_ = msg->header.frame_id;
             have_intrinsics_depth_ = true;
-            have_intrinsics_ = true; // still allow processing when depth intrinsics ready
-            RCLCPP_INFO(this->get_logger(), "Got depth camera intrinsics fx=%.2f fy=%.2f cx=%.2f cy=%.2f frame=%s", fx_, fy_, cx_, cy_, frame_id_.c_str());
-            if (depth_aligner_)
-            {
-                depth_aligner_->setDepthIntrinsics(fx_, fy_, cx_, cy_);
-            }
+            RCLCPP_INFO(this->get_logger(), "Got depth camera intrinsics fx=%.2f fy=%.2f cx=%.2f cy=%.2f frame=%s",
+                        depth_camera_matrix_.at<double>(0, 0),
+                        depth_camera_matrix_.at<double>(1, 1),
+                        depth_camera_matrix_.at<double>(0, 2),
+                        depth_camera_matrix_.at<double>(1, 2),
+                        frame_id_.c_str());
         }
     }
 
-    void PoseEstimate::cameraInfoColorCallback(const CameraInfo::SharedPtr msg)
+    void PoseEstimateBase::cameraInfoColorCallback(const CameraInfo::SharedPtr msg)
     {
         if (!have_intrinsics_color_)
         {
-            color_fx_ = msg->k[0];
-            color_fy_ = msg->k[4];
-            color_cx_ = msg->k[2];
-            color_cy_ = msg->k[5];
+            color_camera_matrix_.at<double>(0, 0) = msg->k[0];
+            color_camera_matrix_.at<double>(1, 1) = msg->k[4];
+            color_camera_matrix_.at<double>(0, 2) = msg->k[2];
+            color_camera_matrix_.at<double>(1, 2) = msg->k[5];
             color_frame_id_ = msg->header.frame_id;
             have_intrinsics_color_ = true;
-            RCLCPP_INFO(this->get_logger(), "Got color camera intrinsics fx=%.2f fy=%.2f cx=%.2f cy=%.2f frame=%s", color_fx_, color_fy_, color_cx_, color_cy_, msg->header.frame_id.c_str());
-            if (depth_aligner_)
-            {
-                depth_aligner_->setColorIntrinsics(color_fx_, color_fy_, color_cx_, color_cy_);
-            }
+            RCLCPP_INFO(this->get_logger(), "Got color camera intrinsics fx=%.2f fy=%.2f cx=%.2f cy=%.2f frame=%s",
+                        color_camera_matrix_.at<double>(0, 0),
+                        color_camera_matrix_.at<double>(1, 1),
+                        color_camera_matrix_.at<double>(0, 2),
+                        color_camera_matrix_.at<double>(1, 2),
+                        msg->header.frame_id.c_str());
         }
     }
 
-    void PoseEstimate::syncCallback(const Image::ConstSharedPtr depth_msg, const Image::ConstSharedPtr mask_msg)
+    void PoseEstimateBase::syncCallback(const Image::ConstSharedPtr depth_msg, const Image::ConstSharedPtr mask_msg)
     {
         if (!have_intrinsics_depth_)
         {
@@ -164,7 +159,7 @@ namespace axispose
 
         // If we have color intrinsics, align depth to color image size and mask directly.
         cv::Mat depth_filtered;
-        double pc_fx = fx_, pc_fy = fy_, pc_cx = cx_, pc_cy = cy_;
+        cv::Mat point_cloud_camera_matrix = depth_camera_matrix_;
         if (have_intrinsics_color_)
         {
             // align depth to mask (color) resolution
@@ -172,10 +167,7 @@ namespace axispose
             depth_filtered = cv::Mat::zeros(aligned_depth.size(), aligned_depth.type());
             aligned_depth.copyTo(depth_filtered, mask_cv);
             // Depth has been remapped to color image grid.
-            pc_fx = color_fx_;
-            pc_fy = color_fy_;
-            pc_cx = color_cx_;
-            pc_cy = color_cy_;
+            point_cloud_camera_matrix = color_camera_matrix_;
         }
         else
         {
@@ -189,7 +181,7 @@ namespace axispose
         }
 
         // convert to organized point cloud (one point per pixel, NaN for invalid) - now only depth is passed
-        auto organized = pc_processor_->depthMaskToPointCloud(depth_filtered, pc_fx, pc_fy, pc_cx, pc_cy);
+        auto organized = pc_processor_->depthMaskToPointCloud(depth_filtered, point_cloud_camera_matrix);
         if (!organized || organized->empty())
         {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Empty organized point cloud after mask filtering");
@@ -229,99 +221,33 @@ namespace axispose
             denoisePointCloud(valid_cloud);
         }
 
-        // compute pose using valid_cloud
+        // Compute pose using a polymorphic algorithm implementation.
         geometry_msgs::msg::PoseStamped pose_msg;
-        std::string algo = algorithm_type_;
-        for (auto &c : algo)
-            c = static_cast<char>(std::tolower(c));
-        const bool run_gaussian = (algo == "gaussian");
-        const bool run_ceres = (algo == "ceres");
-        const bool run_ransac = (algo == "ransac" || algo == "sacline");
-
         if (benchmark_)
         {
-            if (run_gaussian || run_ceres)
-            {
-                auto tup = benchmark_->run("pose_" + algo, [this, &valid_cloud, &mask_cv, &depth_msg, &algo]()
-                                           {
-                    geometry_msgs::msg::PoseStamped p;
-                    if (algo == "ceres") {
-                        p = this->computePoseCeres(valid_cloud, mask_cv, depth_msg->header.stamp);
-                    } else {
-                        p = this->computePoseGaussian(valid_cloud, mask_cv, depth_msg->header.stamp);
-                    }
-                    return std::make_tuple(p, static_cast<size_t>(valid_cloud->size())); }, [](const std::tuple<geometry_msgs::msg::PoseStamped, size_t> &t) -> std::vector<std::string>
-                                           {
-                    const auto &pose = std::get<0>(t).pose;
-                    size_t n = std::get<1>(t);
-                    std::vector<std::string> out;
-                    out.reserve(8);
-                    out.push_back(std::to_string(n));
-                    out.push_back(std::to_string(pose.position.x));
-                    out.push_back(std::to_string(pose.position.y));
-                    out.push_back(std::to_string(pose.position.z));
-                    out.push_back(std::to_string(pose.orientation.x));
-                    out.push_back(std::to_string(pose.orientation.y));
-                    out.push_back(std::to_string(pose.orientation.z));
-                    out.push_back(std::to_string(pose.orientation.w));
-                    return out; });
-                pose_msg = std::get<0>(tup);
-            }
-            else if (run_ransac)
-            {
-                auto tup = benchmark_->run("pose_ransac", [this, &valid_cloud, &depth_msg]()
-                                           {
-                    auto p = this->computePoseFromSACLine(valid_cloud, depth_msg->header.stamp);
-                    return std::make_tuple(p, static_cast<size_t>(valid_cloud->size())); }, [](const std::tuple<geometry_msgs::msg::PoseStamped, size_t> &t) -> std::vector<std::string>
-                                           {
-                    const auto &pose = std::get<0>(t).pose;
-                    size_t n = std::get<1>(t);
-                    std::vector<std::string> out;
-                    out.reserve(8);
-                    out.push_back(std::to_string(n));
-                    out.push_back(std::to_string(pose.position.x));
-                    out.push_back(std::to_string(pose.position.y));
-                    out.push_back(std::to_string(pose.position.z));
-                    out.push_back(std::to_string(pose.orientation.x));
-                    out.push_back(std::to_string(pose.orientation.y));
-                    out.push_back(std::to_string(pose.orientation.z));
-                    out.push_back(std::to_string(pose.orientation.w));
-                    return out; });
-                pose_msg = std::get<0>(tup);
-            }
-            else
-            {
-                auto tup = benchmark_->run("pose_covariance", [this, &valid_cloud, &depth_msg]()
-                                           {
-                    auto p = this->computePoseFromCloud(valid_cloud, depth_msg->header.stamp);
-                    return std::make_tuple(p, static_cast<size_t>(valid_cloud->size())); }, [](const std::tuple<geometry_msgs::msg::PoseStamped, size_t> &t) -> std::vector<std::string>
-                                           {
-                    const auto &pose = std::get<0>(t).pose;
-                    size_t n = std::get<1>(t);
-                    std::vector<std::string> out;
-                    out.reserve(8);
-                    out.push_back(std::to_string(n));
-                    out.push_back(std::to_string(pose.position.x));
-                    out.push_back(std::to_string(pose.position.y));
-                    out.push_back(std::to_string(pose.position.z));
-                    out.push_back(std::to_string(pose.orientation.x));
-                    out.push_back(std::to_string(pose.orientation.y));
-                    out.push_back(std::to_string(pose.orientation.z));
-                    out.push_back(std::to_string(pose.orientation.w));
-                    return out; });
-                pose_msg = std::get<0>(tup);
-            }
+            auto tup = benchmark_->run(benchmarkLabel(), [this, &valid_cloud, &mask_cv, &depth_msg]()
+                                       {
+                auto p = this->computePoseByAlgorithm(valid_cloud, mask_cv, depth_msg->header.stamp);
+                return std::make_tuple(p, static_cast<size_t>(valid_cloud->size())); }, [](const std::tuple<geometry_msgs::msg::PoseStamped, size_t> &t) -> std::vector<std::string>
+                                       {
+                const auto &pose = std::get<0>(t).pose;
+                size_t n = std::get<1>(t);
+                std::vector<std::string> out;
+                out.reserve(8);
+                out.push_back(std::to_string(n));
+                out.push_back(std::to_string(pose.position.x));
+                out.push_back(std::to_string(pose.position.y));
+                out.push_back(std::to_string(pose.position.z));
+                out.push_back(std::to_string(pose.orientation.x));
+                out.push_back(std::to_string(pose.orientation.y));
+                out.push_back(std::to_string(pose.orientation.z));
+                out.push_back(std::to_string(pose.orientation.w));
+                return out; });
+            pose_msg = std::get<0>(tup);
         }
         else
         {
-            if (run_ceres)
-                pose_msg = computePoseCeres(valid_cloud, mask_cv, depth_msg->header.stamp);
-            else if (run_gaussian)
-                pose_msg = computePoseGaussian(valid_cloud, mask_cv, depth_msg->header.stamp);
-            else if (run_ransac)
-                pose_msg = computePoseFromSACLine(valid_cloud, depth_msg->header.stamp);
-            else
-                pose_msg = computePoseFromCloud(valid_cloud, depth_msg->header.stamp);
+            pose_msg = computePoseByAlgorithm(valid_cloud, mask_cv, depth_msg->header.stamp);
         }
         pose_msg.header.stamp = depth_msg->header.stamp;
         pose_msg.header.frame_id = have_intrinsics_color_ ? color_frame_id_ : frame_id_;
@@ -339,195 +265,37 @@ namespace axispose
         }
     }
 
-    pcl::PointCloud<pcl::PointXYZ>::Ptr PoseEstimate::depthMaskToPointCloud(const cv::Mat &depth)
+    pcl::PointCloud<pcl::PointXYZ>::Ptr PoseEstimateBase::depthMaskToPointCloud(const cv::Mat &depth)
     {
-        return pc_processor_->depthMaskToPointCloud(depth, fx_, fy_, cx_, cy_);
+        return pc_processor_->depthMaskToPointCloud(depth, depth_camera_matrix_);
     }
 
-    cv::Mat PoseEstimate::alignDepthToColor(const cv::Mat &depth, int color_width, int color_height)
+    cv::Mat PoseEstimateBase::alignDepthToColor(const cv::Mat &depth, int color_width, int color_height)
     {
         if (depth_aligner_)
         {
-            return depth_aligner_->align(depth, color_width, color_height);
+            return depth_aligner_->align(depth, depth_camera_matrix_, color_camera_matrix_, color_width, color_height);
         }
         return cv::Mat();
     }
 
-    void PoseEstimate::denoisePointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud)
+    void PoseEstimateBase::denoisePointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud)
     {
-        // voxel grid downsample and statistical outlier removal, then keep nearest cluster to origin
-        // reuse a single temporary cloud buffer to avoid repeated allocations
-        pcl::PointCloud<pcl::PointXYZ>::Ptr tmp(new pcl::PointCloud<pcl::PointXYZ>());
-
-        // voxel grid downsample
-        if (voxel_leaf_size_ > 0)
-        {
-            pcl::VoxelGrid<pcl::PointXYZ> vg;
-            vg.setInputCloud(cloud);
-            vg.setLeafSize(static_cast<float>(voxel_leaf_size_), static_cast<float>(voxel_leaf_size_), static_cast<float>(voxel_leaf_size_));
-            vg.filter(*tmp);
-
-            cloud.swap(tmp);
-            tmp->clear();
-        }
-        if (use_sor_)
-        {
-
-            // statistical outlier removal
-            pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sor;
-            sor.setInputCloud(cloud);
-            sor.setMeanK(static_cast<int>(sor_mean_k_));
-            sor.setStddevMulThresh(sor_std_mul_);
-            sor.filter(*tmp);
-            cloud.swap(tmp);
-            tmp->clear();
-        }
-        if (use_euclidean_cluster_)
-        {
-
-            pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
-            tree->setInputCloud(cloud);
-
-            std::vector<pcl::PointIndices> cluster_indices;
-            pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
-            ec.setClusterTolerance(0.5f); // 50cm
-            ec.setMinClusterSize(50);
-            ec.setMaxClusterSize(25000);
-            ec.setSearchMethod(tree);
-            ec.setInputCloud(cloud);
-            ec.extract(cluster_indices);
-            pcl::PointIndices::Ptr best_cluster_indices(new pcl::PointIndices);
-            if (!debug_ || debug_->enabled("debug_clusters"))
-            {
-                RCLCPP_INFO(this->get_logger(), "Found %zu clusters.", cluster_indices.size());
-            }
-            if (!cluster_indices.empty())
-            {
-                // 找到质心离原点 (0,0,0) 最近的 cluster
-                size_t best_idx = 0;
-                switch (cluster_mode_)
-                {
-                case 0:
-                { // 策略1：找质心离原点最近的cluster
-                    float min_dist = std::numeric_limits<float>::max();
-                    for (size_t i = 0; i < cluster_indices.size(); ++i)
-                    {
-                        Eigen::Vector4f centroid;
-                        pcl::compute3DCentroid(*cloud, cluster_indices[i].indices, centroid);
-
-                        float dist = centroid.head<3>().norm();
-
-                        if (dist < min_dist)
-                        {
-                            min_dist = dist;
-                            best_idx = i;
-                        }
-                    }
-                }
-                break;
-                case 1:
-                { // 策略2：找点数最多的cluster
-                    size_t max_size = 0;
-                    for (const auto &indices : cluster_indices)
-                    {
-                        if (indices.indices.size() > max_size)
-                        {
-                            max_size = indices.indices.size();
-                            best_idx = &indices - &cluster_indices[0];
-                        }
-                    }
-                }
-                break;
-                case 2:
-                default:
-                { // 策略3：对每个cluster做ransac,找拟合直线inliers最多的cluster
-
-                    pcl::PointCloud<pcl::PointXYZ>::Ptr cluster_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-                    size_t inlier_cnt = 0;
-                    // 使用extraction提取当前cluster的点云
-                    for (const auto &cluster : cluster_indices)
-                    {
-                        cluster_cloud->points.clear();
-                        for (const auto &indices : cluster.indices)
-                        {
-                            cluster_cloud->points.push_back(cloud->points[indices]);
-                        }
-                        cluster_cloud->width = cluster_cloud->points.size();
-                        cluster_cloud->height = 1;
-
-                        pcl::ModelCoefficients::Ptr coefficients_tmp(new pcl::ModelCoefficients);
-                        pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
-                        pcl::SACSegmentation<pcl::PointXYZ> seg;
-                        seg.setOptimizeCoefficients(true);
-                        seg.setModelType(pcl::SACMODEL_LINE);
-                        seg.setMethodType(pcl::SAC_RANSAC);
-                        seg.setMaxIterations(200);
-                        seg.setDistanceThreshold(sacline_distance_threshold_);
-                        seg.setInputCloud(cluster_cloud);
-                        seg.segment(*inliers, *coefficients_tmp);
-
-                        if (!inliers->indices.empty() && inliers->indices.size() > inlier_cnt)
-                        {
-                            inlier_cnt = inliers->indices.size();
-                            best_idx = &cluster - &cluster_indices[0];
-                            *coefficients = *coefficients_tmp;
-                            *best_cluster_indices = *inliers;
-                        }
-                    }
-                }
-                break;
-                }
-
-                pcl::ExtractIndices<pcl::PointXYZ> extract;
-                extract.setInputCloud(cloud);
-                // *best_cluster_indices = cluster_indices[best_idx];
-                pcl::PointIndices::Ptr indices_ptr(new pcl::PointIndices(cluster_indices[best_idx]));
-                extract.setIndices(indices_ptr);
-                extract.setNegative(false);
-                extract.filter(*tmp);
-                cloud.swap(tmp);
-                tmp->clear();
-                if (use_sacline_)
-                {
-                    extract.setInputCloud(cloud);
-                    extract.setIndices(best_cluster_indices);
-                    extract.setNegative(false);
-                    extract.filter(*tmp);
-                    cloud.swap(tmp);
-                }
-            }
-        }
-
-        // if (use_sacline_)
-        // {
-        //     pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
-        //     // Create the segmentation object
-        //     pcl::SACSegmentation<pcl::PointXYZ> seg;
-        //     // Optional
-        //     seg.setOptimizeCoefficients(true);
-        //     // Mandatory
-        //     seg.setModelType(pcl::SACMODEL_LINE);
-        //     seg.setMethodType(pcl::SAC_RANSAC);
-        //     seg.setDistanceThreshold(sacline_distance_threshold_);
-
-        //     seg.setInputCloud(cloud);
-        //     seg.segment(*inliers, *coefficients);
-        //     if (!inliers->indices.empty())
-        //     {
-        //         pcl::ExtractIndices<pcl::PointXYZ> extract;
-        //         extract.setInputCloud(cloud);
-        //         extract.setIndices(inliers);
-        //         extract.setNegative(false);
-        //         extract.filter(*tmp);
-        //         cloud.swap(tmp);
-        //         tmp->clear();
-        //     }
-        // }
+        PointCloudDenoiseOptions options;
+        options.voxel_leaf_size = voxel_leaf_size_;
+        options.use_sor = use_sor_;
+        options.sor_mean_k = static_cast<int>(sor_mean_k_);
+        options.sor_std_mul = sor_std_mul_;
+        options.use_euclidean_cluster = use_euclidean_cluster_;
+        options.cluster_mode = cluster_mode_;
+        options.sacline_distance_threshold = sacline_distance_threshold_;
+        pc_processor_->denoisePointCloud(cloud, options);
     }
 
-    geometry_msgs::msg::PoseStamped PoseEstimate::computePoseFromCloud(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const rclcpp::Time &stamp)
+    geometry_msgs::msg::PoseStamped PoseEstimateBase::computePoseFromCloud(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const rclcpp::Time &stamp)
     {
         geometry_msgs::msg::PoseStamped pose;
+        (void)stamp;
         if (!cloud || cloud->empty())
         {
             return pose;
@@ -550,6 +318,7 @@ namespace axispose
         Eigen::Vector3f axis_x = eig_vecs.col(2).normalized();
         Eigen::Vector3f axis_y = eig_vecs.col(1).normalized();
         Eigen::Vector3f axis_z = eig_vecs.col(0).normalized();
+        (void)axis_z;
         // Eigen::Vector3f axis_x_ = coefficients->values[3] * Eigen::Vector3f::UnitX() +
         //                           coefficients->values[4] * Eigen::Vector3f::UnitY() +
         //                           coefficients->values[5] * Eigen::Vector3f::UnitZ();
@@ -590,18 +359,36 @@ namespace axispose
         return pose;
     }
 
-    geometry_msgs::msg::PoseStamped PoseEstimate::computePoseFromSACLine(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const rclcpp::Time &stamp)
+    geometry_msgs::msg::PoseStamped PoseEstimateBase::computePoseFromSACLine(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const rclcpp::Time &stamp)
     {
         geometry_msgs::msg::PoseStamped pose;
+        (void)stamp;
         if (!cloud || cloud->empty())
         {
             return pose;
         }
 
-        Eigen::Vector3f line_point(coefficients->values[0], coefficients->values[1], coefficients->values[2]);
-        Eigen::Vector3f axis_x = coefficients->values[3] * Eigen::Vector3f::UnitX() +
-                                 coefficients->values[4] * Eigen::Vector3f::UnitY() +
-                                 coefficients->values[5] * Eigen::Vector3f::UnitZ();
+        pcl::ModelCoefficients coefficients;
+        pcl::PointIndices inliers;
+        pcl::SACSegmentation<pcl::PointXYZ> seg;
+        seg.setOptimizeCoefficients(true);
+        seg.setModelType(pcl::SACMODEL_LINE);
+        seg.setMethodType(pcl::SAC_RANSAC);
+        seg.setMaxIterations(300);
+        seg.setDistanceThreshold(sacline_distance_threshold_);
+        seg.setInputCloud(cloud);
+        seg.segment(inliers, coefficients);
+
+        if (coefficients.values.size() < 6)
+        {
+            RCLCPP_WARN(this->get_logger(), "RANSAC line fitting failed, fallback to PCA pose");
+            return computePoseFromCloud(cloud, stamp);
+        }
+
+        Eigen::Vector3f line_point(coefficients.values[0], coefficients.values[1], coefficients.values[2]);
+        Eigen::Vector3f axis_x = coefficients.values[3] * Eigen::Vector3f::UnitX() +
+                                 coefficients.values[4] * Eigen::Vector3f::UnitY() +
+                                 coefficients.values[5] * Eigen::Vector3f::UnitZ();
         axis_x.normalize();
         Eigen::Vector3f axis_y = axis_x.unitOrthogonal();
         Eigen::Vector3f axis_z = axis_x.cross(axis_y).normalized();
@@ -635,7 +422,7 @@ namespace axispose
         return pose;
     }
 
-    geometry_msgs::msg::PoseStamped PoseEstimate::computePoseGaussian(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const cv::Mat &mask_cv, const rclcpp::Time &stamp)
+    geometry_msgs::msg::PoseStamped PoseEstimateBase::computePoseGaussian(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const cv::Mat &mask_cv, const rclcpp::Time &stamp)
     {
         geometry_msgs::msg::PoseStamped pose;
         (void)mask_cv;
@@ -691,7 +478,7 @@ namespace axispose
         return pose;
     }
 
-    geometry_msgs::msg::PoseStamped PoseEstimate::computePoseCeres(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const cv::Mat &mask_cv, const rclcpp::Time &stamp)
+    geometry_msgs::msg::PoseStamped PoseEstimateBase::computePoseCeres(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const cv::Mat &mask_cv, const rclcpp::Time &stamp)
     {
         geometry_msgs::msg::PoseStamped pose;
         (void)stamp;
@@ -738,21 +525,12 @@ namespace axispose
         Eigen::Vector3d p = out_point.cast<double>();
         Eigen::Vector3d m = p.cross(d);
 
+        const cv::Mat &Kcv = have_intrinsics_color_ ? color_camera_matrix_ : depth_camera_matrix_;
         Eigen::Matrix3d K = Eigen::Matrix3d::Identity();
-        if (have_intrinsics_color_)
-        {
-            K(0, 0) = color_fx_;
-            K(1, 1) = color_fy_;
-            K(0, 2) = color_cx_;
-            K(1, 2) = color_cy_;
-        }
-        else
-        {
-            K(0, 0) = fx_;
-            K(1, 1) = fy_;
-            K(0, 2) = cx_;
-            K(1, 2) = cy_;
-        }
+        K(0, 0) = Kcv.at<double>(0, 0);
+        K(1, 1) = Kcv.at<double>(1, 1);
+        K(0, 2) = Kcv.at<double>(0, 2);
+        K(1, 2) = Kcv.at<double>(1, 2);
 
         axispose::CeresJointOptimizer optimizer;
         const bool ok = optimizer.optimizePose(d, m, cloud_ptr, K, line2d_abc, p, 12, 90, 3.0, 20.0);
@@ -792,6 +570,83 @@ namespace axispose
         return pose;
     }
 
+    PoseEstimatePCA::PoseEstimatePCA(const rclcpp::NodeOptions &options)
+        : PoseEstimateBase("pose_estimate_pca", options)
+    {
+    }
+
+    geometry_msgs::msg::PoseStamped PoseEstimatePCA::computePoseByAlgorithm(
+        pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud,
+        const cv::Mat &mask_cv,
+        const rclcpp::Time &stamp)
+    {
+        (void)mask_cv;
+        return computePoseFromCloud(cloud, stamp);
+    }
+
+    std::string PoseEstimatePCA::benchmarkLabel() const
+    {
+        return "pose_pca";
+    }
+
+    PoseEstimateRANSAC::PoseEstimateRANSAC(const rclcpp::NodeOptions &options)
+        : PoseEstimateBase("pose_estimate_ransac", options)
+    {
+    }
+
+    geometry_msgs::msg::PoseStamped PoseEstimateRANSAC::computePoseByAlgorithm(
+        pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud,
+        const cv::Mat &mask_cv,
+        const rclcpp::Time &stamp)
+    {
+        (void)mask_cv;
+        return computePoseFromSACLine(cloud, stamp);
+    }
+
+    std::string PoseEstimateRANSAC::benchmarkLabel() const
+    {
+        return "pose_ransac";
+    }
+
+    PoseEstimateGaussian::PoseEstimateGaussian(const rclcpp::NodeOptions &options)
+        : PoseEstimateBase("pose_estimate_gaussian", options)
+    {
+    }
+
+    geometry_msgs::msg::PoseStamped PoseEstimateGaussian::computePoseByAlgorithm(
+        pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud,
+        const cv::Mat &mask_cv,
+        const rclcpp::Time &stamp)
+    {
+        return computePoseGaussian(cloud, mask_cv, stamp);
+    }
+
+    std::string PoseEstimateGaussian::benchmarkLabel() const
+    {
+        return "pose_gaussian";
+    }
+
+    PoseEstimateCeres::PoseEstimateCeres(const rclcpp::NodeOptions &options)
+        : PoseEstimateBase("pose_estimate_ceres", options)
+    {
+    }
+
+    geometry_msgs::msg::PoseStamped PoseEstimateCeres::computePoseByAlgorithm(
+        pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud,
+        const cv::Mat &mask_cv,
+        const rclcpp::Time &stamp)
+    {
+        return computePoseCeres(cloud, mask_cv, stamp);
+    }
+
+    std::string PoseEstimateCeres::benchmarkLabel() const
+    {
+        return "pose_ceres";
+    }
+
 } // namespace axispose
 #include <rclcpp_components/register_node_macro.hpp>
-RCLCPP_COMPONENTS_REGISTER_NODE(axispose::PoseEstimate)
+RCLCPP_COMPONENTS_REGISTER_NODE(axispose::PoseEstimatePCA)
+RCLCPP_COMPONENTS_REGISTER_NODE(axispose::PoseEstimateRANSAC)
+RCLCPP_COMPONENTS_REGISTER_NODE(axispose::PoseEstimateGaussian)
+RCLCPP_COMPONENTS_REGISTER_NODE(axispose::PoseEstimateCeres)

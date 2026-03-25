@@ -119,7 +119,10 @@ ament_target_dependencies(PoseEstimate
   pcl_conversions
   image_transport
 )
-rclcpp_components_register_nodes(PoseEstimate PLUGIN "axispose::PoseEstimate" EXECUTABLE PoseEstimate_node)
+rclcpp_components_register_nodes(PoseEstimate PLUGIN "axispose::PoseEstimatePCA" EXECUTABLE PoseEstimatePCA_node)
+rclcpp_components_register_nodes(PoseEstimate PLUGIN "axispose::PoseEstimateRANSAC" EXECUTABLE PoseEstimateRANSAC_node)
+rclcpp_components_register_nodes(PoseEstimate PLUGIN "axispose::PoseEstimateGaussian" EXECUTABLE PoseEstimateGaussian_node)
+rclcpp_components_register_nodes(PoseEstimate PLUGIN "axispose::PoseEstimateCeres" EXECUTABLE PoseEstimateCeres_node)
 
 # next one
 add_library(Visualization SHARED
@@ -179,20 +182,4 @@ install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config/ DESTINATION share/${PROJECT_NAME}/config)
 install(DIRECTORY launch/ DESTINATION share/${PROJECT_NAME}/launch)
 
-add_executable(evaluate_pipelines 
-  src/evaluate_pipelines.cpp
-  src/gaussian_map_solver.cpp
-  src/ceres_joint_optimizer.cpp
-)
-target_link_libraries(evaluate_pipelines
-  ${OpenCV_LIBS}
-  ${PCL_LIBRARIES}
-  Ceres::ceres
-)
-ament_target_dependencies(evaluate_pipelines
-  Eigen3
-)
-install(TARGETS evaluate_pipelines
-  DESTINATION lib/${PROJECT_NAME}
-)
 ament_package()
