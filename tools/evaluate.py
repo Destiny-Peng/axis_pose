@@ -145,13 +145,13 @@ def evaluate(rows):
         # also compute XY-projected angle stats
         ang_xy = [p['ang_err_yz_deg'] for p in per if not math.isnan(p.get('ang_err_yz_deg', float('nan')))]
         if ang_xy:
-            stats['ang_xy_mean_deg'] = mean(ang_xy)
-            stats['ang_xy_std_deg'] = stdev(ang_xy) if len(ang_xy) > 1 else 0.0
-            stats['ang_xy_median_deg'] = median(ang_xy)
+            stats['ang_yz_mean_deg'] = mean(ang_xy)
+            stats['ang_yz_std_deg'] = stdev(ang_xy) if len(ang_xy) > 1 else 0.0
+            stats['ang_yz_median_deg'] = median(ang_xy)
         else:
-            stats['ang_xy_mean_deg'] = ''
-            stats['ang_xy_std_deg'] = ''
-            stats['ang_xy_median_deg'] = ''
+            stats['ang_yz_mean_deg'] = ''
+            stats['ang_yz_std_deg'] = ''
+            stats['ang_yz_median_deg'] = ''
     else:
         stats['count'] = 0
     return per, stats
@@ -171,8 +171,8 @@ def save_summary(stats, out_path):
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or '.', exist_ok=True)
     with open(out_path, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['count', 'trans_rmse', 'trans_mean', 'trans_std', 'trans_median', 'ang_mean_deg', 'ang_std_deg', 'ang_median_deg', 'ang_xy_mean_deg', 'ang_xy_std_deg', 'ang_xy_median_deg'])
-        writer.writerow([stats.get('count', 0), stats.get('trans_rmse', ''), stats.get('trans_mean', ''), stats.get('trans_std', ''), stats.get('trans_median', ''), stats.get('ang_mean_deg', ''), stats.get('ang_std_deg', ''), stats.get('ang_median_deg', ''), stats.get('ang_xy_mean_deg', ''), stats.get('ang_xy_std_deg', ''), stats.get('ang_xy_median_deg', '')])
+        writer.writerow(['count', 'trans_rmse', 'trans_mean', 'trans_std', 'trans_median', 'ang_mean_deg', 'ang_std_deg', 'ang_median_deg', 'ang_yz_mean_deg', 'ang_yz_std_deg', 'ang_yz_median_deg'])
+        writer.writerow([stats.get('count', 0), stats.get('trans_rmse', ''), stats.get('trans_mean', ''), stats.get('trans_std', ''), stats.get('trans_median', ''), stats.get('ang_mean_deg', ''), stats.get('ang_std_deg', ''), stats.get('ang_median_deg', ''), stats.get('ang_yz_mean_deg', ''), stats.get('ang_yz_std_deg', ''), stats.get('ang_yz_median_deg', '')])
 
 
 def plot_hist(per, out_dir):
@@ -236,7 +236,7 @@ def plot_poses(rows, out_dir):
     ax.legend()
     ax.set_title('Estimated (red) vs Ground-truth (blue) poses')
     plt.savefig(os.path.join(out_dir, 'poses_3d.png'))
-    plt.show()
+    # plt.show()
     plt.close()
 
     # top-down XY

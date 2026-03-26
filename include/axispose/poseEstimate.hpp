@@ -35,6 +35,7 @@
 
 #include <memory>
 #include <atomic>
+#include <Eigen/Core>
 
 namespace axispose
 {
@@ -113,6 +114,10 @@ namespace axispose
         // align depth image to color image size using intrinsics
         cv::Mat alignDepthToColor(const cv::Mat &depth, int color_width, int color_height);
         void denoisePointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud);
+        Eigen::Vector3d stabilizeAxisDirection(const Eigen::Vector3d &axis, const Eigen::Vector3d *reference_axis = nullptr);
+
+        bool axis_history_valid_{false};
+        Eigen::Vector3d axis_history_{1.0, 0.0, 0.0};
     };
 
     class PoseEstimatePCA : public PoseEstimateBase

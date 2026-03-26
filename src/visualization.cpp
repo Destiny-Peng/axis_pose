@@ -20,6 +20,106 @@
 namespace axispose
 {
 
+    static bool lineFromPointDir(const cv::Point2f &p, const cv::Point2f &v, double &A, double &B, double &C)
+    {
+        const double n = std::hypot(static_cast<double>(v.x), static_cast<double>(v.y));
+        if (n < 1e-9)
+            return false;
+        const double vx = static_cast<double>(v.x) / n;
+        const double vy = static_cast<double>(v.y) / n;
+        A = -vy;
+        B = vx;
+        C = -(A * static_cast<double>(p.x) + B * static_cast<double>(p.y));
+        return true;
+    }
+
+    static bool extractUpperLowerEdgeLines(const cv::Mat &mask, double &ua, double &ub, double &uc, double &la, double &lb, double &lc)
+    {
+        std::vector<cv::Point> mask_pts;
+        cv::findNonZero(mask, mask_pts);
+        if (mask_pts.size() < 40)
+            return false;
+
+        cv::Vec4f center_line;
+        cv::fitLine(mask_pts, center_line, cv::DIST_L2, 0, 0.01, 0.01);
+        cv::Point2f v(center_line[0], center_line[1]);
+        const float nv = std::sqrt(v.x * v.x + v.y * v.y);
+        if (nv < 1e-6f)
+            return false;
+        v.x /= nv;
+        v.y /= nv;
+
+        // Normal direction used to split upper/lower edge points.
+        cv::Point2f n(-v.y, v.x);
+
+        std::vector<std::vector<cv::Point>> contours;
+        cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+        if (contours.empty())
+            return false;
+
+        size_t best_idx = 0;
+        size_t best_size = 0;
+        for (size_t i = 0; i < contours.size(); ++i)
+        {
+            if (contours[i].size() > best_size)
+            {
+                best_size = contours[i].size();
+                best_idx = i;
+            }
+        }
+        const auto &contour = contours[best_idx];
+        if (contour.size() < 40)
+            return false;
+
+        double s_min = std::numeric_limits<double>::infinity();
+        double s_max = -std::numeric_limits<double>::infinity();
+        std::vector<double> svals;
+        svals.reserve(contour.size());
+        for (const auto &p : contour)
+        {
+            const double s = static_cast<double>(n.x) * static_cast<double>(p.x) + static_cast<double>(n.y) * static_cast<double>(p.y);
+            svals.push_back(s);
+            s_min = std::min(s_min, s);
+            s_max = std::max(s_max, s);
+        }
+
+        const double span = s_max - s_min;
+        if (span < 3.0)
+            return false;
+
+        const double band = std::max(2.0, 0.10 * span);
+        std::vector<cv::Point> upper_pts;
+        std::vector<cv::Point> lower_pts;
+        upper_pts.reserve(contour.size() / 4);
+        lower_pts.reserve(contour.size() / 4);
+
+        for (size_t i = 0; i < contour.size(); ++i)
+        {
+            const double s = svals[i];
+            if (s >= (s_max - band))
+                upper_pts.push_back(contour[i]);
+            if (s <= (s_min + band))
+                lower_pts.push_back(contour[i]);
+        }
+
+        if (upper_pts.size() < 10 || lower_pts.size() < 10)
+            return false;
+
+        cv::Vec4f ul, ll;
+        cv::fitLine(upper_pts, ul, cv::DIST_L2, 0, 0.01, 0.01);
+        cv::fitLine(lower_pts, ll, cv::DIST_L2, 0, 0.01, 0.01);
+        cv::Point2f uv(ul[0], ul[1]);
+        cv::Point2f up(ul[2], ul[3]);
+        cv::Point2f lv(ll[0], ll[1]);
+        cv::Point2f lp(ll[2], ll[3]);
+
+        if (!lineFromPointDir(up, uv, ua, ub, uc))
+            return false;
+        if (!lineFromPointDir(lp, lv, la, lb, lc))
+            return false;
+        return true;
+    }
+
     Visualization::Visualization(const rclcpp::NodeOptions &options) : rclcpp::Node("visualization", options)
     {
         this->declare_parameter("mask_topic", std::string("/yolo/mask"));
@@ -62,7 +162,7 @@ namespace axispose
                     line_eval_ofs_.open(line_eval_csv_path_, std::ios::out | std::ios::trunc);
                     if (line_eval_ofs_.is_open())
                     {
-                        line_eval_ofs_ << "frame_idx,timestamp_sec,timestamp_nsec,angle_err_deg,offset_err_px,valid\n";
+                        line_eval_ofs_ << "frame_idx,timestamp_sec,timestamp_nsec,angle_err_deg,offset_err_px,upper_a,upper_b,upper_c,lower_a,lower_b,lower_c,valid\n";
                         line_eval_ofs_.flush();
                     }
                     else
@@ -108,7 +208,7 @@ namespace axispose
                 line_eval_ofs_.open(line_eval_csv_path_, std::ios::out | std::ios::trunc);
                 if (line_eval_ofs_.is_open())
                 {
-                    line_eval_ofs_ << "frame_idx,timestamp_sec,timestamp_nsec,angle_err_deg,offset_err_px,valid\n";
+                    line_eval_ofs_ << "frame_idx,timestamp_sec,timestamp_nsec,angle_err_deg,offset_err_px,upper_a,upper_b,upper_c,lower_a,lower_b,lower_c,valid\n";
                     line_eval_ofs_.flush();
                 }
             }
@@ -410,7 +510,15 @@ namespace axispose
         {
             double angle_err_deg = std::numeric_limits<double>::quiet_NaN();
             double offset_err_px = std::numeric_limits<double>::quiet_NaN();
+            double upper_a = std::numeric_limits<double>::quiet_NaN();
+            double upper_b = std::numeric_limits<double>::quiet_NaN();
+            double upper_c = std::numeric_limits<double>::quiet_NaN();
+            double lower_a = std::numeric_limits<double>::quiet_NaN();
+            double lower_b = std::numeric_limits<double>::quiet_NaN();
+            double lower_c = std::numeric_limits<double>::quiet_NaN();
             int valid_eval = 0;
+
+            const bool edges_ok = extractUpperLowerEdgeLines(mask_cv, upper_a, upper_b, upper_c, lower_a, lower_b, lower_c);
 
             std::vector<cv::Point> mask_pts;
             cv::findNonZero(mask_cv, mask_pts);
@@ -481,6 +589,16 @@ namespace axispose
             else
             {
                 line_eval_ofs_ << ",";
+            }
+            line_eval_ofs_ << ",";
+            if (edges_ok)
+            {
+                line_eval_ofs_ << upper_a << "," << upper_b << "," << upper_c << ","
+                               << lower_a << "," << lower_b << "," << lower_c;
+            }
+            else
+            {
+                line_eval_ofs_ << ",,,,,";
             }
             line_eval_ofs_ << "," << valid_eval << "\n";
             if ((save_counter_ % 10) == 0)

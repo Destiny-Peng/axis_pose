@@ -1,0 +1,31 @@
+evaluation:
+  # Workspace-relative paths
+  setup_bash: install/setup.bash
+  launch_file: launch/launch.py
+
+  # Input data
+  rgb_dir: image_tag/rgb
+  depth_dir: image_tag/depth
+
+  # Output root uses strftime format
+  out_root: statistics/eval_unified_%Y%m%d_%H%M%S
+
+  # Algorithms: pca | ransac | gaussian | ceres
+  algorithms:
+    - pca
+    - ransac
+    - gaussian
+    - ceres
+
+  # Launch timeout per algorithm run
+  timeout_seconds: 65
+
+  # Evaluation switches
+  line2d_eval_enabled: true
+  groundtruth_eval_enabled: true
+
+  # Ground-truth evaluation settings (used only when groundtruth_eval_enabled=true)
+  groundtruth_images_dir: "/home/jacy/project/final_design/axispose/image_tag/rgb"
+  groundtruth_camera_info_file: config/d457_color.yaml
+  groundtruth_layout_file: tools/apriltag.yaml
+  groundtruth_min_tags: 4

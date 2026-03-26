@@ -46,7 +46,7 @@ def generate_launch_description():
     statistic_directory_arg = DeclareLaunchArgument(
         'statistic_directory', default_value=default_statistic, description='统计信息文件路径')
     pose_plugin_arg = DeclareLaunchArgument(
-        'pose_plugin', default_value='axispose::PoseEstimateCeres',
+        'pose_plugin', default_value='axispose::PoseEstimateRANSAC',
         description='pose component plugin: axispose::PoseEstimatePCA|PoseEstimateRANSAC|PoseEstimateGaussian|PoseEstimateCeres')
     # Composable node 描述
     container = ComposableNodeContainer(

@@ -35,7 +35,7 @@
 ## 三、作业流程（推荐）
 
 1. 准备输入目录：`image1/rgb` 与 `image1/depth`。
-2. 运行四算法脚本：`evaluate_4_methods.sh`。
+2. 运行统一评估脚本：`python3 tools/eval_runner.py`。
 3. 查看每算法目录中的：
     - `metrics.csv`
     - `line2d_metrics.csv`
@@ -67,7 +67,8 @@
 - `include/axispose/debug_manager.hpp`
 
 ### 评估工具
-- `evaluate_4_methods.sh`
+- `tools/eval_runner.py`
+- `tools/eval_config.yaml`
 - `tools/evaluate_line2d.py`
 
 ## 五、构建目标（CMake）

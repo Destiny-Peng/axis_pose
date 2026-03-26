@@ -23,6 +23,8 @@
 - [x] DepthAligner 改为无状态 API（由调用方传入 depth/color camera matrix）
 - [x] PointCloudProcessor 接管完整去噪流程（voxel + SOR + cluster 筛选），PoseEstimate 仅做编排
 - [x] Visualization 投影链路改为 camera matrix 表达，去除回调内分散标量内参解析
+- [x] 评估工具链统一为单入口：`tools/eval_runner.py` + `tools/eval_config.yaml`，支持仅计时 / 纯line2d / GT联合评估
+- [x] 清理重复评估入口脚本（evaluate_3/4/just_run、tools/run_full_eval）
 
 ## Code Quality Pattern Summary
 - 问题模式：

@@ -16,13 +16,13 @@
 	- 公共基类：`PoseEstimateBase`
 	- 独立算法节点：`PoseEstimatePCA`、`PoseEstimateRANSAC`、`PoseEstimateGaussian`、`PoseEstimateCeres`
 - 算法切换不再依赖单节点内部 `if/else` 路由，改为 launch 层切换 `pose_plugin`。
-- 评测脚本默认超时为 65 秒（并可从 `config/param.yaml` 的 `evaluation_timeout_seconds` 读取）。
+- 评测入口统一为 `tools/eval_runner.py`，参数优先写入 `tools/eval_config.yaml`。
 
 ## 3) 目录重点
 - 核心源码：`src/`、`include/axispose/`
 - 配置：`config/param.yaml`
 - 启动：`launch/launch.py` + `launch/launch_*.py`
-- 评测：`evaluate_4_methods.sh`、`tools/evaluate_line2d.py`
+- 评测：`tools/eval_runner.py`、`tools/eval_config.yaml`、`tools/evaluate_line2d.py`
 - 文档：`docs/`
 - 历史/可能冗余：`src_1/`、旧 `statistics/` 结果
 
@@ -42,4 +42,4 @@
 ## 6) 协作约定
 - 新增算法优先采用“新增独立组件节点”方式，不破坏已有节点。
 - 参数优先放入 `config/param.yaml`，脚本仅做最小编排。
-- 评估比较统一使用 `evaluate_4_methods.sh`，避免多套口径并行。
+- 评估比较统一使用 `tools/eval_runner.py`，避免多套口径并行。

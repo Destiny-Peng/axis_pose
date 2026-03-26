@@ -3,7 +3,7 @@
 Central CLI to run common tools tasks (consolidates existing scripts).
 
 Commands:
-  run_full_eval    Run the full evaluation pipeline (extract -> average -> align -> evaluate)
+    run_full_eval    (deprecated) call unified tools/eval_runner.py
   extract_gt       Run extract_groundtruth.py
   gt_average       Run gt_ingest.py average
   gt_align         Run gt_ingest.py align
@@ -38,53 +38,13 @@ def load_module_from_path(path: str) -> types.ModuleType:
 
 
 def cmd_run_full_eval(args):
-    out_dir = args.out_dir or f"statistics/run_{subprocess.check_output(['date','+%Y%m%d_%H%M%S']).decode().strip()}"
-    Path(out_dir).mkdir(parents=True, exist_ok=True)
-
-    # 1) extract
-    run_cmd(['python3', 'tools/extract_groundtruth.py', '--images', args.images, '--camera-info', args.camera_info, '--tag-size', str(args.tag_size), '--output', os.path.join(out_dir, 'groundtruth.csv'), '--save-annotated', os.path.join(out_dir, 'gt_vis')])
-
-    # 2) average
-    # try to call gt_ingest.average_gt_per_image directly
-    gt_ingest_path = os.path.join('tools', 'gt_ingest.py')
-    try:
-        gt_mod = load_module_from_path(gt_ingest_path)
-        print('Calling gt_ingest.average_gt_per_image directly')
-        gt_mod.average_gt_per_image(os.path.join(out_dir, 'groundtruth.csv'), os.path.join(out_dir, 'groundtruth_averaged.csv'))
-    except Exception as e:
-        print('Direct call to gt_ingest failed, falling back to subprocess:', e)
-        run_cmd(['python3', gt_ingest_path, 'average', '--input', os.path.join(out_dir, 'groundtruth.csv'), '--output', os.path.join(out_dir, 'groundtruth_averaged.csv')])
-
-    # 3) align
-    try:
-        if 'gt_mod' not in locals():
-            gt_mod = load_module_from_path(gt_ingest_path)
-        print('Calling gt_ingest.align_estimates_to_gt directly')
-        gt_mod.align_estimates_to_gt(args.est_csv, os.path.join(out_dir, 'groundtruth_averaged.csv'), os.path.join(out_dir, 'aligned.csv'), tol_s=0.5, by_sequence=True)
-    except Exception as e:
-        print('Direct call to gt_ingest.align failed, falling back to subprocess:', e)
-        run_cmd(['python3', gt_ingest_path, 'align', '--est', args.est_csv, '--gt', os.path.join(out_dir, 'groundtruth_averaged.csv'), '--output', os.path.join(out_dir, 'aligned.csv'), '--by-sequence'])
-
-    # 4) evaluate
-    eval_path = os.path.join('tools', 'evaluate.py')
-    try:
-        ev_mod = load_module_from_path(eval_path)
-        print('Calling evaluate functions directly')
-        rows = ev_mod.read_aligned(os.path.join(out_dir, 'aligned.csv'))
-        per, stats = ev_mod.evaluate(rows)
-        ev_mod.save_perframe(per, os.path.join(out_dir, 'per_frame_errors.csv'))
-        ev_mod.save_summary(stats, os.path.join(out_dir, 'evaluation_summary.csv'))
-        # plots
-        try:
-            ev_mod.plot_hist(per, os.path.join(out_dir, 'plots'))
-            ev_mod.plot_poses(rows, os.path.join(out_dir, 'plots'))
-        except Exception as e:
-            print('Plotting failed:', e)
-    except Exception as e:
-        print('Direct call to evaluate failed, falling back to subprocess:', e)
-        run_cmd(['python3', eval_path, '--input', os.path.join(out_dir, 'aligned.csv'), '--out', os.path.join(out_dir, 'per_frame_errors.csv'), '--summary', os.path.join(out_dir, 'evaluation_summary.csv'), '--plots', os.path.join(out_dir, 'plots')])
-
-    print('Done. Results in', out_dir)
+    print('run_full_eval in tools/run.py is deprecated. Use tools/eval_runner.py with tools/eval_config.yaml instead.')
+    cmd = ['python3', 'tools/eval_runner.py']
+    if getattr(args, 'config', ''):
+        cmd += ['--config', args.config]
+    if args.out_dir:
+        cmd += ['--out-root', args.out_dir]
+    run_cmd(cmd)
 
 
 def main():
@@ -92,10 +52,7 @@ def main():
     sub = parser.add_subparsers(dest='cmd')
 
     p_full = sub.add_parser('run_full_eval', help='Run full evaluation pipeline')
-    p_full.add_argument('--images', required=True, help='Images dir')
-    p_full.add_argument('--camera-info', default='config/d457_color.yaml')
-    p_full.add_argument('--tag-size', type=float, default=0.05)
-    p_full.add_argument('--est-csv', default='statistics/metrics.csv', help='Estimates CSV')
+    p_full.add_argument('--config', default='tools/eval_config.yaml', help='Path to unified eval config')
     p_full.add_argument('--out-dir', default='', help='Output directory')
 
     p_extract = sub.add_parser('extract_gt', help='Run extract_groundtruth.py')

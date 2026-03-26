@@ -292,6 +292,47 @@ namespace axispose
         pc_processor_->denoisePointCloud(cloud, options);
     }
 
+    Eigen::Vector3d PoseEstimateBase::stabilizeAxisDirection(const Eigen::Vector3d &axis, const Eigen::Vector3d *reference_axis)
+    {
+        Eigen::Vector3d out = axis.normalized();
+        if (!std::isfinite(out.x()) || !std::isfinite(out.y()) || !std::isfinite(out.z()))
+        {
+            return Eigen::Vector3d::UnitX();
+        }
+
+        // Prefer external reference when available (e.g., PCA axis from current frame).
+        if (reference_axis)
+        {
+            Eigen::Vector3d ref = reference_axis->normalized();
+            if (std::isfinite(ref.x()) && std::isfinite(ref.y()) && std::isfinite(ref.z()) && out.dot(ref) < 0.0)
+            {
+                out = -out;
+            }
+        }
+
+        // Keep temporal consistency to avoid yaw sign flicker between adjacent frames.
+        if (axis_history_valid_)
+        {
+            if (out.dot(axis_history_) < 0.0)
+            {
+                out = -out;
+            }
+            axis_history_ = (0.8 * axis_history_ + 0.2 * out).normalized();
+        }
+        else
+        {
+            // First frame: keep forward-facing preference in camera frame.
+            if (out.x() < 0.0)
+            {
+                out = -out;
+            }
+            axis_history_ = out;
+            axis_history_valid_ = true;
+        }
+
+        return out;
+    }
+
     geometry_msgs::msg::PoseStamped PoseEstimateBase::computePoseFromCloud(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const rclcpp::Time &stamp)
     {
         geometry_msgs::msg::PoseStamped pose;
@@ -319,6 +360,7 @@ namespace axispose
         Eigen::Vector3f axis_y = eig_vecs.col(1).normalized();
         Eigen::Vector3f axis_z = eig_vecs.col(0).normalized();
         (void)axis_z;
+        axis_x = stabilizeAxisDirection(axis_x.cast<double>(), nullptr).cast<float>();
         // Eigen::Vector3f axis_x_ = coefficients->values[3] * Eigen::Vector3f::UnitX() +
         //                           coefficients->values[4] * Eigen::Vector3f::UnitY() +
         //                           coefficients->values[5] * Eigen::Vector3f::UnitZ();
@@ -390,6 +432,7 @@ namespace axispose
                                  coefficients.values[4] * Eigen::Vector3f::UnitY() +
                                  coefficients.values[5] * Eigen::Vector3f::UnitZ();
         axis_x.normalize();
+        axis_x = stabilizeAxisDirection(axis_x.cast<double>(), nullptr).cast<float>();
         Eigen::Vector3f axis_y = axis_x.unitOrthogonal();
         Eigen::Vector3f axis_z = axis_x.cross(axis_y).normalized();
         Eigen::Matrix3f R;
@@ -450,6 +493,8 @@ namespace axispose
         {
             out_axis = pca_axis;
         }
+        Eigen::Vector3d pca_axis_d = pca_axis.cast<double>();
+        out_axis = stabilizeAxisDirection(out_axis.cast<double>(), &pca_axis_d).cast<float>();
 
         pose.pose.position.x = out_point.x();
         pose.pose.position.y = out_point.y();
@@ -540,8 +585,33 @@ namespace axispose
             return computePoseGaussian(cloud, mask_cv, stamp);
         }
 
-        // Keep position anchored to robust Gaussian axis point; use Ceres mainly for direction refinement.
+        // Disambiguate line direction sign using current-frame PCA + temporal history.
+        Eigen::Vector4f centroid4;
+        pcl::compute3DCentroid(*cloud_ptr, centroid4);
+        Eigen::Matrix3f covariance;
+        pcl::computeCovarianceMatrixNormalized(*cloud_ptr, centroid4, covariance);
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> eig(covariance);
+        Eigen::Vector3d pca_axis = eig.eigenvectors().col(2).cast<double>().normalized();
+        d = stabilizeAxisDirection(d, &pca_axis).normalized();
+
+        // Recover line point from optimized Plucker (d, m), then anchor near cloud centroid.
+        const double dn2 = d.squaredNorm();
         Eigen::Vector3d optimized_point = p;
+        if (dn2 > 1e-12)
+        {
+            optimized_point = d.cross(m) / dn2;
+            const Eigen::Vector3d centroid = centroid4.head<3>().cast<double>();
+            optimized_point = optimized_point + d * d.dot(centroid - optimized_point);
+
+            // Keep motion bounded against initial point to avoid occasional jumps.
+            const double max_shift = 0.20; // meters
+            Eigen::Vector3d delta = optimized_point - p;
+            const double norm_delta = delta.norm();
+            if (norm_delta > max_shift)
+            {
+                optimized_point = p + delta * (max_shift / norm_delta);
+            }
+        }
 
         pose.pose.position.x = optimized_point.x();
         pose.pose.position.y = optimized_point.y();
