@@ -8,6 +8,9 @@ set -u
 RGB_DIR="${1:-${ROOT_DIR}/image1/rgb}"
 DEPTH_DIR="${2:-${ROOT_DIR}/image1/depth}"
 OUT_ROOT="${3:-${ROOT_DIR}/statistics/eval4_$(date +%Y%m%d_%H%M%S)}"
+GT_IMAGES_DIR="${4:-}"
+GT_CAMERA_INFO="${5:-${ROOT_DIR}/config/d457_color.yaml}"
+GT_TAG_SIZE="${6:-0.05}"
 LAUNCH_FILE="${ROOT_DIR}/launch/launch.py"
 PARAM_FILE="${ROOT_DIR}/config/param.yaml"
 
@@ -17,6 +20,35 @@ if [[ -f "${PARAM_FILE}" ]]; then
   if [[ -n "${timeout_from_param}" ]]; then
     TIMEOUT_DEFAULT="${timeout_from_param}"
   fi
+fi
+
+GT_EVAL_ENABLED="false"
+if [[ -f "${PARAM_FILE}" ]]; then
+  gt_enabled_from_param="$(awk -F': ' '/groundtruth_eval_enabled:/{print $2; exit}' "${PARAM_FILE}" | tr -d ' ')"
+  gt_images_from_param="$(awk -F': ' '/groundtruth_images_dir:/{print $2; exit}' "${PARAM_FILE}" | tr -d '" ')"
+  gt_caminfo_from_param="$(awk -F': ' '/groundtruth_camera_info_file:/{print $2; exit}' "${PARAM_FILE}" | tr -d '" ')"
+  gt_tag_from_param="$(awk -F': ' '/groundtruth_tag_size_m:/{print $2; exit}' "${PARAM_FILE}" | tr -d ' ')"
+
+  if [[ -n "${gt_enabled_from_param}" ]]; then
+    GT_EVAL_ENABLED="${gt_enabled_from_param}"
+  fi
+  if [[ -z "${GT_IMAGES_DIR}" && -n "${gt_images_from_param}" ]]; then
+    GT_IMAGES_DIR="${ROOT_DIR}/${gt_images_from_param}"
+  fi
+  if [[ "${GT_CAMERA_INFO}" == "${ROOT_DIR}/config/d457_color.yaml" && -n "${gt_caminfo_from_param}" ]]; then
+    if [[ "${gt_caminfo_from_param}" = /* ]]; then
+      GT_CAMERA_INFO="${gt_caminfo_from_param}"
+    else
+      GT_CAMERA_INFO="${ROOT_DIR}/${gt_caminfo_from_param}"
+    fi
+  fi
+  if [[ "${GT_TAG_SIZE}" == "0.05" && -n "${gt_tag_from_param}" ]]; then
+    GT_TAG_SIZE="${gt_tag_from_param}"
+  fi
+fi
+
+if [[ -n "${GT_IMAGES_DIR}" ]]; then
+  GT_EVAL_ENABLED="true"
 fi
 
 if [[ ! -d "${RGB_DIR}" || ! -d "${DEPTH_DIR}" ]]; then
@@ -74,6 +106,20 @@ run_one() {
   else
     echo "WARN: line2d_metrics.csv missing for ${alg}"
   fi
+
+  if [[ "${GT_EVAL_ENABLED}" == "true" ]]; then
+    if [[ -z "${GT_IMAGES_DIR}" || ! -d "${GT_IMAGES_DIR}" ]]; then
+      echo "WARN: GT eval enabled but GT_IMAGES_DIR is empty or missing, skip ${alg}"
+    else
+      echo "[GT] Running GT evaluation for ${alg}"
+      "${ROOT_DIR}/tools/run_full_eval.sh" \
+        "${GT_IMAGES_DIR}" \
+        "${GT_CAMERA_INFO}" \
+        "${GT_TAG_SIZE}" \
+        "${out_dir}/metrics.csv" \
+        "${out_dir}/gt_eval"
+    fi
+  fi
 }
 
 for alg in "${ALGS[@]}"; do
@@ -84,4 +130,7 @@ echo "All done. Output root: ${OUT_ROOT}"
 for alg in "${ALGS[@]}"; do
   echo "  - ${OUT_ROOT}/${alg}/metrics.csv"
   echo "  - ${OUT_ROOT}/${alg}/line2d_summary.csv"
+  if [[ "${GT_EVAL_ENABLED}" == "true" ]]; then
+    echo "  - ${OUT_ROOT}/${alg}/gt_eval/evaluation_summary.csv"
+  fi
 done

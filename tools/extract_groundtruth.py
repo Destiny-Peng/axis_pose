@@ -1,16 +1,9 @@
 #!/usr/bin/env python3
 """
-Extract AprilTag-based ground-truth poses from an images directory.
-Outputs a CSV with: filename,timestamp,tag_id,tx,ty,tz,qx,qy,qz,qw,score
+Extract AprilTag bundle (board) ground-truth poses from an images directory.
 
-Usage:
-  python3 tools/extract_groundtruth.py --images /path/to/images --camera-info config/d457_color.yaml --tag-size 0.05 --output gt.csv --save-annotated out/annot
-
-Dependencies:
-  pip install opencv-python numpy pyyaml pandas apriltag
-  or for pupil_apriltags: pip install pupil-apriltags
-
-The script will try to import either `apriltag` or `pupil_apriltags`.
+It estimates ONE pose per image by jointly using all detected tags in a bundle
+layout file (e.g. 36 tags) and then reprojects the full board to the image.
 """
 import argparse
 import os
@@ -18,19 +11,14 @@ import sys
 import glob
 import csv
 import math
+import re
 import numpy as np
 import cv2
 import yaml
 
-try:
-    import apriltag as at
-    DETECTOR_LIB = 'apriltag'
-except Exception:
-    try:
-        from pupil_apriltags import Detector as APDetector
-        DETECTOR_LIB = 'pupil_apriltags'
-    except Exception:
-        DETECTOR_LIB = None
+import apriltag as at
+DETECTOR_LIB = 'apriltag'
+
 
 
 def read_camera_info_yaml(path):
@@ -94,16 +82,93 @@ def rotation_matrix_to_quaternion(R):
     return [x, y, z, w]
 
 
-def detect_tags_and_pose(img_path, detector, K, D, tag_size_m):
-    img = cv2.imread(img_path)
-    if img is None:
-        return []
+def quaternion_to_rotation_matrix(qx, qy, qz, qw):
+    # Normalize to avoid scale issues from malformed configs.
+    n = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    if n < 1e-12:
+        return np.eye(3, dtype=np.float64)
+    x = qx / n
+    y = qy / n
+    z = qz / n
+    w = qw / n
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]
+    ], dtype=np.float64)
+
+
+def read_layout_yaml(path):
+    with open(path, 'r') as f:
+        raw = f.read()
+
+    data = None
+    try:
+        data = yaml.safe_load(raw)
+    except Exception:
+        data = None
+
+    if not data or 'layout' not in data:
+        # Fallback for custom non-standard format:
+        # [id: 0, size: 0.06, x: ..., ...]
+        entries = re.findall(r'\[(.*?)\]', raw, flags=re.DOTALL)
+        parsed = []
+        for e in entries:
+            if 'id:' not in e or 'size:' not in e:
+                continue
+            item = {}
+            parts = [p.strip() for p in e.split(',') if p.strip()]
+            for p in parts:
+                if ':' not in p:
+                    continue
+                k, v = p.split(':', 1)
+                item[k.strip()] = v.strip()
+            if 'id' in item and 'size' in item and 'x' in item and 'y' in item and 'z' in item:
+                parsed.append(item)
+        data = {'layout': parsed}
+
+    if not data or 'layout' not in data or not data['layout']:
+        raise RuntimeError(f"Cannot parse layout entries from {path}")
+
+    layout = {}
+    for item in data['layout']:
+        tid = int(item['id'])
+        size = float(item['size'])
+        tx = float(item['x'])
+        ty = float(item['y'])
+        tz = float(item['z'])
+        qw = float(item.get('qw', 1.0))
+        qx = float(item.get('qx', 0.0))
+        qy = float(item.get('qy', 0.0))
+        qz = float(item.get('qz', 0.0))
+
+        rot = quaternion_to_rotation_matrix(qx, qy, qz, qw)
+        trans = np.array([tx, ty, tz], dtype=np.float64)
+
+        # Local tag-frame corners order must match detector corner order.
+        s = size
+        local_corners = np.array([
+            [-s / 2.0, s / 2.0, 0.0],
+            [s / 2.0, s / 2.0, 0.0],
+            [s / 2.0, -s / 2.0, 0.0],
+            [-s / 2.0, -s / 2.0, 0.0]
+        ], dtype=np.float64)
+
+        world_corners = (rot @ local_corners.T).T + trans
+        layout[tid] = {
+            'size': size,
+            'center': trans,
+            'corners3d': world_corners
+        }
+    return layout
+
+
+def detect_tags(img, detector):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     detections = []
     if DETECTOR_LIB == 'apriltag':
         dets = detector.detect(gray)
         for d in dets:
-            # apriltag python returns 'id', 'center', 'corners', 'hamming', 'decision_margin'
             tid = int(d.tag_id) if hasattr(d, 'tag_id') else int(d['id'])
             corners = np.array(d.corners) if hasattr(d, 'corners') else np.array(d['corners'])
             score = float(d.hamming) if hasattr(d, 'hamming') else float(d.get('decision_margin', 0.0))
@@ -117,45 +182,151 @@ def detect_tags_and_pose(img_path, detector, K, D, tag_size_m):
             detections.append((tid, corners, score))
     else:
         raise RuntimeError('No apriltag detector available. Install apriltag or pupil_apriltags')
+    return detections
 
-    results = []
+
+def estimate_bundle_pose(img_path, detector, K, D, layout, min_tags):
+    img = cv2.imread(img_path)
+    if img is None:
+        return None
+
+    detections = detect_tags(img, detector)
+    obj_points = []
+    img_points = []
+    used_tag_ids = []
+    used_scores = []
+    detected_corners = {}
+
     for tid, corners, score in detections:
-        # object points in tag frame: corners assumed order corresponds to image corners
-        s = float(tag_size_m)
-        obj_pts = np.array([
-            [-s/2.0,  s/2.0, 0.0],
-            [ s/2.0,  s/2.0, 0.0],
-            [ s/2.0, -s/2.0, 0.0],
-            [-s/2.0, -s/2.0, 0.0]
-        ], dtype=np.float32)
-        img_pts = corners.astype(np.float32)
-        # ensure correct shape
-        if img_pts.shape[0] != 4:
+        if tid not in layout:
             continue
-        # solvePnP
-        try:
-            ok, rvec, tvec = cv2.solvePnP(obj_pts, img_pts, K, D, flags=cv2.SOLVEPNP_ITERATIVE)
-            if not ok:
-                continue
-            R, _ = cv2.Rodrigues(rvec)
-            q = rotation_matrix_to_quaternion(R)
-            tx, ty, tz = float(tvec[0][0]), float(tvec[1][0]), float(tvec[2][0])
-            results.append({'tag_id': tid, 't': (tx, ty, tz), 'q': q, 'score': score, 'corners': corners, 'rvec': rvec, 'tvec': tvec})
-        except Exception as e:
-            # fallback: skip
-            print('solvePnP failed for', img_path, 'tag', tid, e)
+        if corners.shape[0] != 4:
             continue
-    return results
+        obj_points.extend(layout[tid]['corners3d'])
+        img_points.extend(corners.astype(np.float64))
+        used_tag_ids.append(tid)
+        used_scores.append(score)
+        detected_corners[tid] = corners
+
+    unique_tags = sorted(set(used_tag_ids))
+    if len(unique_tags) < int(min_tags):
+        return {
+            'ok': False,
+            'img': img,
+            'num_tags': len(unique_tags),
+            'num_points': len(obj_points),
+            'tag_ids': unique_tags,
+            'message': f'not enough tags: {len(unique_tags)} < {min_tags}'
+        }
+
+    obj_points = np.asarray(obj_points, dtype=np.float64)
+    img_points = np.asarray(img_points, dtype=np.float64)
+
+    # ok, rvec, tvec, inliers = cv2.solvePnPRansac(
+    #     obj_points,
+    #     img_points,
+    #     K,
+    #     D,
+    #     iterationsCount=500,
+    #     reprojectionError=3.0,
+    #     confidence=0.9,
+    #     flags=cv2.SOLVEPNP_ITERATIVE
+    # )
+    # use solvepnp directly
+    ok, rvec, tvec = cv2.solvePnP(
+        obj_points,
+        img_points,
+        K,
+        D,
+        flags=cv2.SOLVEPNP_ITERATIVE
+    )
+    inliers = np.arange(len(img_points))  # all inliers since no RANSAC
+    if not ok:
+        return {
+            'ok': False,
+            'img': img,
+            'num_tags': len(unique_tags),
+            'num_points': len(obj_points),
+            'tag_ids': unique_tags,
+            'message': 'solvePnPRansac failed'
+        }
+
+    proj, _ = cv2.projectPoints(obj_points, rvec, tvec, K, D)
+    proj = proj.reshape(-1, 2)
+    residuals = np.linalg.norm(img_points - proj, axis=1)
+    mean_err = float(np.mean(residuals)) if residuals.size > 0 else 0.0
+
+    R, _ = cv2.Rodrigues(rvec)
+    q = rotation_matrix_to_quaternion(R)
+    tx, ty, tz = float(tvec[0][0]), float(tvec[1][0]), float(tvec[2][0])
+    return {
+        'ok': True,
+        'img': img,
+        'rvec': rvec,
+        'tvec': tvec,
+        't': (tx, ty, tz),
+        'q': q,
+        'num_tags': len(unique_tags),
+        'num_points': int(obj_points.shape[0]),
+        'tag_ids': unique_tags,
+        'score': float(np.mean(used_scores)) if used_scores else 0.0,
+        'mean_reproj_err': mean_err,
+        'inliers': int(inliers.shape[0]) if inliers is not None else 0,
+        'detected_corners': detected_corners
+    }
+
+
+def draw_bundle_reprojection(img, result, layout, K, D):
+    out = img.copy()
+
+    # Draw observed corners (yellow) for debugging.
+    for tid, corners in result.get('detected_corners', {}).items():
+        for p in corners:
+            cv2.circle(out, tuple(np.int32(np.round(p))), 2, (0, 255, 255), -1)
+        c = np.mean(corners, axis=0).astype(int)
+        cv2.putText(out, f'det:{tid}', (int(c[0]) + 4, int(c[1]) - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 255), 1)
+
+    # Reproject full 36-tag layout.
+    for tid, info in layout.items():
+        c3d = info['corners3d'].astype(np.float64)
+        imgpts, _ = cv2.projectPoints(c3d, result['rvec'], result['tvec'], K, D)
+        imgpts = imgpts.reshape(-1, 2)
+        poly = np.int32(np.round(imgpts)).reshape((-1, 1, 2))
+        cv2.polylines(out, [poly], True, (0, 255, 0), 1)
+
+        center3d = info['center'].reshape(1, 3).astype(np.float64)
+        center2d, _ = cv2.projectPoints(center3d, result['rvec'], result['tvec'], K, D)
+        c = tuple(np.int32(np.round(center2d.reshape(2))))
+        cv2.putText(out, str(tid), (c[0] + 2, c[1] - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 0, 0), 1)
+
+    axis_len = 0.85
+    obj_axes = np.array([
+        [0.0, 0.0, 0.0],
+        [axis_len, 0.0, 0.0],
+        [0.0, axis_len, 0.0],
+        [0.0, 0.0, axis_len]
+    ], dtype=np.float64)
+    axis2d, _ = cv2.projectPoints(obj_axes, result['rvec'], result['tvec'], K, D)
+    axis2d = np.int32(np.round(axis2d.reshape(-1, 2)))
+    o = tuple(axis2d[0])
+    cv2.line(out, o, tuple(axis2d[1]), (0, 0, 255), 2)
+    cv2.line(out, o, tuple(axis2d[2]), (0, 255, 0), 2)
+    cv2.line(out, o, tuple(axis2d[3]), (255, 0, 0), 2)
+
+    msg = f"tags:{result['num_tags']} inliers:{result['inliers']} err:{result['mean_reproj_err']:.2f}px"
+    cv2.putText(out, msg, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (20, 220, 20), 2)
+    return out
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--images', required=True, help='Directory with images (jpg/png)')
     parser.add_argument('--camera-info', required=True, help='camera_info YAML file')
-    parser.add_argument('--tag-size', required=True, type=float, help='AprilTag size in meters (side length)')
+    parser.add_argument('--layout', required=True, help='AprilTag bundle layout YAML file (contains ids, size and 3D positions)')
     parser.add_argument('--output', default='groundtruth.csv', help='Output CSV file')
     parser.add_argument('--save-annotated', default='', help='Optional dir to save annotated images')
-    parser.add_argument('--ext', default='png', help='Image extension to scan (png/jpg)')
+    parser.add_argument('--ext', default='png', help='Primary image extension to scan (png/jpg/jpeg)')
+    parser.add_argument('--min-tags', type=int, default=4, help='Minimum detected tags required for bundle pose')
     parser.add_argument('--visualize', action='store_true', help='Show annotations in a window')
     args = parser.parse_args()
 
@@ -164,6 +335,7 @@ def main():
         sys.exit(1)
 
     K, D = read_camera_info_yaml(args.camera_info)
+    layout = read_layout_yaml(args.layout)
 
     # create detector
     if DETECTOR_LIB == 'apriltag':
@@ -171,7 +343,15 @@ def main():
     else:
         detector = APDetector(families='tag36h11')
 
-    images = sorted(glob.glob(os.path.join(args.images, f'*.{args.ext}'))) + sorted(glob.glob(os.path.join(args.images, f'*.jpg')))
+    ext = args.ext.lower().lstrip('.')
+    images = sorted(glob.glob(os.path.join(args.images, f'*.{ext}')))
+    if ext != 'jpg':
+        images += sorted(glob.glob(os.path.join(args.images, '*.jpg')))
+    if ext != 'jpeg':
+        images += sorted(glob.glob(os.path.join(args.images, '*.jpeg')))
+    if ext != 'png':
+        images += sorted(glob.glob(os.path.join(args.images, '*.png')))
+    images = sorted(set(images))
     if not images:
         print('No images found in', args.images)
         sys.exit(1)
@@ -182,7 +362,7 @@ def main():
 
     with open(args.output, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
-        writer.writerow(['filename', 'timestamp', 'tag_id', 'tx', 'ty', 'tz', 'qx', 'qy', 'qz', 'qw', 'score'])
+        writer.writerow(['filename', 'timestamp', 'bundle', 'num_tags', 'num_points', 'inliers', 'tx', 'ty', 'tz', 'qx', 'qy', 'qz', 'qw', 'mean_reproj_err_px', 'score'])
         for img_path in images:
             print('Processing', img_path)
             # derive timestamp from filename if possible (ISO or numbers), else use file mtime
@@ -195,46 +375,43 @@ def main():
             except Exception:
                 ts = ''
 
-            results = detect_tags_and_pose(img_path, detector, K, D, args.tag_size)
-            if results:
-                img = cv2.imread(img_path)
-                for r in results:
-                    tx,ty,tz = r['t']
-                    qx,qy,qz,qw = r['q']
-                    writer.writerow([fname, ts, r['tag_id'], tx, ty, tz, qx, qy, qz, qw, r['score']])
-                    if args.save_annotated:
-                        # draw smaller polygon and tag coordinate axes
-                        corners = r['corners'].astype(int)
-                        cv2.polylines(img, [corners.reshape((-1,1,2))], True, (0,255,0), 1)
-                        # draw tag coordinate axes using projectPoints
-                        axis_len = float(args.tag_size) * 0.5
-                        obj_axes = np.array([[0.0,0.0,0.0],[axis_len,0.0,0.0],[0.0,axis_len,0.0],[0.0,0.0,axis_len]], dtype=np.float32)
-                        try:
-                            imgpts, _ = cv2.projectPoints(obj_axes, r['rvec'], r['tvec'], K, D)
-                            imgpts = imgpts.reshape(-1,2).astype(int)
-                            origin = tuple(imgpts[0])
-                            # x - red, y - green, z - blue
-                            cv2.circle(img, origin, 3, (0,0,255), -1)
-                            cv2.line(img, origin, tuple(imgpts[1]), (0,0,255), 2)
-                            cv2.line(img, origin, tuple(imgpts[2]), (0,255,0), 2)
-                            cv2.line(img, origin, tuple(imgpts[3]), (255,0,0), 2)
-                            cv2.putText(img, f"id:{r['tag_id']}", (origin[0]+6, origin[1]-6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,0,0), 1)
-                        except Exception as e:
-                            # fallback to drawing center
-                            c = np.mean(corners, axis=0).astype(int)
-                            cv2.circle(img, tuple(c), 3, (0,0,255), -1)
-                if args.save_annotated:
-                    outp = os.path.join(args.save_annotated, fname)
-                    cv2.imwrite(outp, img)
-                if args.visualize:
-                    cv2.imshow('annot', img)
-                    key = cv2.waitKey(1)
-                    if key == 27:
-                        print('User cancelled')
-                        return
-            else:
-                # write empty line? skip
-                pass
+            result = estimate_bundle_pose(img_path, detector, K, D, layout, args.min_tags)
+            if result is None:
+                continue
+            if not result['ok']:
+                print(f"  skip: {result['message']}")
+                continue
+
+            tx, ty, tz = result['t']
+            qx, qy, qz, qw = result['q']
+            writer.writerow([
+                fname,
+                ts,
+                'bundle',
+                result['num_tags'],
+                result['num_points'],
+                result['inliers'],
+                tx,
+                ty,
+                tz,
+                qx,
+                qy,
+                qz,
+                qw,
+                result['mean_reproj_err'],
+                result['score']
+            ])
+
+            anno = draw_bundle_reprojection(result['img'], result, layout, K, D)
+            if args.save_annotated:
+                outp = os.path.join(args.save_annotated, fname)
+                cv2.imwrite(outp, anno)
+            if args.visualize:
+                cv2.imshow('annot', anno)
+                key = cv2.waitKey(1)
+                if key == 27:
+                    print('User cancelled')
+                    return
     print('Done. Wrote', args.output)
 
 if __name__ == '__main__':

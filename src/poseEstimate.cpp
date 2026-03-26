@@ -533,7 +533,7 @@ namespace axispose
         K(1, 2) = Kcv.at<double>(1, 2);
 
         axispose::CeresJointOptimizer optimizer;
-        const bool ok = optimizer.optimizePose(d, m, cloud_ptr, K, line2d_abc, p, 12, 90, 3.0, 20.0);
+        const bool ok = optimizer.optimizePose(d, m, cloud_ptr, K, line2d_abc, p, 50, 90, 3.0, 20.0);
         if (!ok)
         {
             RCLCPP_WARN(this->get_logger(), "Ceres optimizer failed, fallback to Gaussian pose");

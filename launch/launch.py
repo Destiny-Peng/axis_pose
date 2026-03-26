@@ -20,8 +20,8 @@ def generate_launch_description():
     pkg_directory = os.path.join(pkg_share, '..', '..', '..', '..')
 
     # 默认图片目录在包内 image1/rgb 和 image1/depth（真实数据）
-    default_rgb = os.path.join(pkg_directory, 'image1', 'rgb')
-    default_depth = os.path.join(pkg_directory, 'image1', 'depth')
+    default_rgb = os.path.join(pkg_directory, 'image_tag', 'rgb')
+    default_depth = os.path.join(pkg_directory, 'image_tag', 'depth')
     default_engine = os.path.join(
         pkg_directory, 'engine', 'occlusion.engine')
     default_statistic = os.path.join(
@@ -46,7 +46,7 @@ def generate_launch_description():
     statistic_directory_arg = DeclareLaunchArgument(
         'statistic_directory', default_value=default_statistic, description='统计信息文件路径')
     pose_plugin_arg = DeclareLaunchArgument(
-        'pose_plugin', default_value='axispose::PoseEstimatePCA',
+        'pose_plugin', default_value='axispose::PoseEstimateCeres',
         description='pose component plugin: axispose::PoseEstimatePCA|PoseEstimateRANSAC|PoseEstimateGaussian|PoseEstimateCeres')
     # Composable node 描述
     container = ComposableNodeContainer(

@@ -12,6 +12,10 @@
     use_euclidean_cluster: true
     sacline_distance_threshold: 0.1
     evaluation_timeout_seconds: 65
+    groundtruth_eval_enabled: false
+    groundtruth_images_dir: ""
+    groundtruth_camera_info_file: config/d457_color.yaml
+    groundtruth_tag_size_m: 0.05
     cluster_mode: 2
     color_image_topic: /camera/color/image_raw
     depth_image_topic: /camera/depth/image_rect_raw

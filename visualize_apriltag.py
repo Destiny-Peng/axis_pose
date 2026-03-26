@@ -268,7 +268,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         '--groundtruth-csv',
-        default='/home/jacy/project/final_design/axispose/statistics/groundtruth_averaged.csv',
+        default='/home/jacy/project/final_design/axispose/statistics/groundtruth_bundle.csv',
         help='groundtruth.csv 文件路径'
     )
     parser.add_argument(

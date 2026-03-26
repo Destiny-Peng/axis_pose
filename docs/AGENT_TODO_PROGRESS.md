@@ -6,7 +6,7 @@
 - [ ] 继续优化 Gaussian 方向稳定性，目标 angle_mean_deg < 0.5
 - [ ] 补充单元/回归测试，覆盖四算法节点组件加载与基础输出
 - [ ] 清理 `src_1/` 与历史脚本，降低维护复杂度
-- [ ] 跨模块统一“数据表达 + 职责边界”：优先把标量内参/重复流程改为结构化对象与工具类（Visualization/Driver/Seg）
+- [ ] 跨模块统一“数据表达 + 职责边界”：继续推进 Driver/Seg（Visualization 已完成首轮）
 
 ## In Progress
 - [ ] 观察 Ceres 在不同数据集上的偏移稳定性（当前仅 image1 全量验证）
@@ -22,6 +22,7 @@
 - [x] PoseEstimate 内参传递统一为 camera matrix（cv::Mat），移除散落 fx/fy/cx/cy 主通路
 - [x] DepthAligner 改为无状态 API（由调用方传入 depth/color camera matrix）
 - [x] PointCloudProcessor 接管完整去噪流程（voxel + SOR + cluster 筛选），PoseEstimate 仅做编排
+- [x] Visualization 投影链路改为 camera matrix 表达，去除回调内分散标量内参解析
 
 ## Code Quality Pattern Summary
 - 问题模式：

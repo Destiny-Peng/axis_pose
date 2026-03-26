@@ -154,14 +154,23 @@ namespace axispose
         RCLCPP_INFO(this->get_logger(), "Visualization node started. Subscribed to %s %s %s %s", color_image_topic.c_str(), pose_topic.c_str(), caminfo_topic.c_str(), mask_topic.c_str());
     }
 
-    // project a 3D point (in camera frame) to pixel using intrinsics
-    static bool projectPoint(const geometry_msgs::msg::Point &p, const sensor_msgs::msg::CameraInfo &cam, cv::Point2f &out)
+    static cv::Mat cameraMatrixFromInfo(const sensor_msgs::msg::CameraInfo &cam)
     {
-        // K: [k0 k1 k2; k3 k4 k5; k6 k7 k8]
-        double fx = cam.k[0];
-        double fy = cam.k[4];
-        double cx = cam.k[2];
-        double cy = cam.k[5];
+        cv::Mat K = cv::Mat::eye(3, 3, CV_64F);
+        K.at<double>(0, 0) = cam.k[0];
+        K.at<double>(1, 1) = cam.k[4];
+        K.at<double>(0, 2) = cam.k[2];
+        K.at<double>(1, 2) = cam.k[5];
+        return K;
+    }
+
+    // project a 3D point (in camera frame) to pixel using camera matrix
+    static bool projectPoint(const geometry_msgs::msg::Point &p, const cv::Mat &camera_matrix, cv::Point2f &out)
+    {
+        const double fx = camera_matrix.at<double>(0, 0);
+        const double fy = camera_matrix.at<double>(1, 1);
+        const double cx = camera_matrix.at<double>(0, 2);
+        const double cy = camera_matrix.at<double>(1, 2);
         if (p.x <= 0.0)
             return false;
         out.x = static_cast<float>(-(p.y / p.x) * fx + cx);
@@ -208,6 +217,7 @@ namespace axispose
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "Visualization: waiting for any camera_info before processing");
             return;
         }
+        const cv::Mat camera_matrix = cameraMatrixFromInfo(*caminfo_to_use);
         // convert rgb to cv::Mat (bgr8 assumed)
         cv::Mat rgb_cv;
         try
@@ -260,8 +270,8 @@ namespace axispose
 
         // project center and axis_end
         cv::Point2f pc, pe;
-        bool okc = projectPoint(center, *caminfo_to_use, pc);
-        bool oke = projectPoint(axis_end, *caminfo_to_use, pe);
+        bool okc = projectPoint(center, camera_matrix, pc);
+        bool oke = projectPoint(axis_end, camera_matrix, pe);
 
         // draw mask overlay (colored)
         cv::Mat vis = rgb_cv.clone();
@@ -300,7 +310,7 @@ namespace axispose
                 axis_far.y = center.y + axis_dir_e.y() * axis_length_ * 100.0;
                 axis_far.z = center.z + axis_dir_e.z() * axis_length_ * 100.0;
                 cv::Point2f pf;
-                if (projectPoint(axis_far, *caminfo_to_use, pf))
+                if (projectPoint(axis_far, camera_matrix, pf))
                 {
                     dir_pt = pf;
                     have_dir = true;
@@ -423,7 +433,7 @@ namespace axispose
                         ps.y = center.y + axis_dir_e.y() * axis_length_ * s;
                         ps.z = center.z + axis_dir_e.z() * axis_length_ * s;
                         cv::Point2f pp;
-                        if (projectPoint(ps, *caminfo_to_use, pp))
+                        if (projectPoint(ps, camera_matrix, pp))
                             proj_samples.push_back(pp);
                     }
 
