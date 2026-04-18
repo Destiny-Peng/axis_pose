@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -25,6 +26,10 @@ namespace axispose
 
         trtyolo::InferOption option_;
         std::unique_ptr<trtyolo::SegmentModel> model_;
+
+        std::uint64_t frames_in_ = 0;
+        bool first_infer_logged_ = false;
+        ros::Time first_frame_stamp_;
     };
 
 } // namespace axispose

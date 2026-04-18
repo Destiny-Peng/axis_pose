@@ -35,7 +35,9 @@
 
 #include <memory>
 #include <atomic>
+#include <array>
 #include <Eigen/Core>
+#include <Eigen/Dense>
 
 namespace axispose
 {
@@ -96,6 +98,10 @@ namespace axispose
         bool use_euclidean_cluster_ = true;
         int cluster_mode_ = 0;                     // 0: closest to origin, 1: largest cluster, 2: RANSAC line inliers
         double sacline_distance_threshold_ = 0.05; // meters
+        int ceres_max_iterations_ = 50;
+        int ceres_max_points_ = 90;
+        double ceres_weight_2d_ = 3.0;
+        double ceres_weight_pos_ = 20.0;
 
         // Debug manager (runtime flags via parameter `debug_flags`)
         std::shared_ptr<DebugManager> debug_;
@@ -115,9 +121,31 @@ namespace axispose
         cv::Mat alignDepthToColor(const cv::Mat &depth, int color_width, int color_height);
         void denoisePointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud);
         Eigen::Vector3d stabilizeAxisDirection(const Eigen::Vector3d &axis, const Eigen::Vector3d *reference_axis = nullptr);
+        geometry_msgs::msg::PoseStamped applyKalmanFilterToPose(const geometry_msgs::msg::PoseStamped &raw_pose, const rclcpp::Time &stamp);
+        void resetKalmanState(const Eigen::Vector3d &position, const Eigen::Vector3d &axis, double stamp_s);
+        void kalmanPredictUpdate1D(double measurement, double dt, double process_noise, double measurement_noise,
+                                   double &x, double &v, Eigen::Matrix2d &P) const;
 
         bool axis_history_valid_{false};
         Eigen::Vector3d axis_history_{1.0, 0.0, 0.0};
+
+        bool kalman_enabled_ = false;
+        double kalman_position_process_noise_ = 1e-3;
+        double kalman_position_measurement_noise_ = 4e-4;
+        double kalman_axis_process_noise_ = 4e-2;
+        double kalman_axis_measurement_noise_ = 8e-3;
+        double kalman_initial_covariance_ = 1.0;
+        double kalman_min_dt_ = 1e-3;
+        double kalman_max_dt_ = 0.2;
+
+        bool kalman_initialized_{false};
+        double kalman_last_stamp_s_{0.0};
+        Eigen::Vector3d kalman_pos_x_{Eigen::Vector3d::Zero()};
+        Eigen::Vector3d kalman_pos_v_{Eigen::Vector3d::Zero()};
+        Eigen::Vector3d kalman_axis_x_{Eigen::Vector3d::UnitX()};
+        Eigen::Vector3d kalman_axis_v_{Eigen::Vector3d::Zero()};
+        std::array<Eigen::Matrix2d, 3> kalman_pos_P_;
+        std::array<Eigen::Matrix2d, 3> kalman_axis_P_;
     };
 
     class PoseEstimatePCA : public PoseEstimateBase

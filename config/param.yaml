@@ -26,3 +26,15 @@
     debug_flags: ["debug_cloud"]
     save_visualization: true
     save_every_n: 1
+    kalman_enabled: true
+    kalman_position_process_noise: 0.001
+    kalman_position_measurement_noise: 0.0004
+    kalman_axis_process_noise: 0.04
+    kalman_axis_measurement_noise: 0.008
+    kalman_initial_covariance: 1.0
+    kalman_min_dt: 0.001
+    kalman_max_dt: 0.2
+    ceres_max_iterations: 50
+    ceres_max_points: 90
+    ceres_weight_2d: 3.0
+    ceres_weight_pos: 20.0

@@ -7,6 +7,7 @@
 #include <sstream>
 #include <cstdint>
 #include <tuple>
+#include <algorithm>
 
 namespace axispose
 {
@@ -25,10 +26,22 @@ namespace axispose
         this->declare_parameter("use_euclidean_cluster", use_euclidean_cluster_);
         this->declare_parameter("cluster_mode", cluster_mode_); // 0: closest to origin, 1: largest cluster, 2: RANSAC line inliers
         this->declare_parameter("sacline_distance_threshold", sacline_distance_threshold_);
+        this->declare_parameter("ceres_max_iterations", ceres_max_iterations_);
+        this->declare_parameter("ceres_max_points", ceres_max_points_);
+        this->declare_parameter("ceres_weight_2d", ceres_weight_2d_);
+        this->declare_parameter("ceres_weight_pos", ceres_weight_pos_);
 
         // statistics parameters
         this->declare_parameter("statistics_directory_path", statistics_directory_path_);
         this->declare_parameter("statistics_enabled", statistics_enabled_);
+        this->declare_parameter("kalman_enabled", kalman_enabled_);
+        this->declare_parameter("kalman_position_process_noise", kalman_position_process_noise_);
+        this->declare_parameter("kalman_position_measurement_noise", kalman_position_measurement_noise_);
+        this->declare_parameter("kalman_axis_process_noise", kalman_axis_process_noise_);
+        this->declare_parameter("kalman_axis_measurement_noise", kalman_axis_measurement_noise_);
+        this->declare_parameter("kalman_initial_covariance", kalman_initial_covariance_);
+        this->declare_parameter("kalman_min_dt", kalman_min_dt_);
+        this->declare_parameter("kalman_max_dt", kalman_max_dt_);
 
         std::string depth_image_topic = this->get_parameter("depth_image_topic").as_string();
         std::string mask_topic = this->get_parameter("mask_topic").as_string();
@@ -43,8 +56,32 @@ namespace axispose
         use_euclidean_cluster_ = this->get_parameter("use_euclidean_cluster").as_bool();
         cluster_mode_ = this->get_parameter("cluster_mode").as_int();
         sacline_distance_threshold_ = this->get_parameter("sacline_distance_threshold").as_double();
+        ceres_max_iterations_ = this->get_parameter("ceres_max_iterations").as_int();
+        ceres_max_points_ = this->get_parameter("ceres_max_points").as_int();
+        ceres_weight_2d_ = this->get_parameter("ceres_weight_2d").as_double();
+        ceres_weight_pos_ = this->get_parameter("ceres_weight_pos").as_double();
+        kalman_enabled_ = this->get_parameter("kalman_enabled").as_bool();
+        kalman_position_process_noise_ = this->get_parameter("kalman_position_process_noise").as_double();
+        kalman_position_measurement_noise_ = this->get_parameter("kalman_position_measurement_noise").as_double();
+        kalman_axis_process_noise_ = this->get_parameter("kalman_axis_process_noise").as_double();
+        kalman_axis_measurement_noise_ = this->get_parameter("kalman_axis_measurement_noise").as_double();
+        kalman_initial_covariance_ = this->get_parameter("kalman_initial_covariance").as_double();
+        kalman_min_dt_ = this->get_parameter("kalman_min_dt").as_double();
+        kalman_max_dt_ = this->get_parameter("kalman_max_dt").as_double();
 
         RCLCPP_INFO(this->get_logger(), "PoseEstimate node starting. Depth: %s Mask: %s ", depth_image_topic.c_str(), mask_topic.c_str());
+        if (kalman_enabled_)
+        {
+            RCLCPP_INFO(this->get_logger(), "Pose Kalman enabled: q_pos=%.6f r_pos=%.6f q_axis=%.6f r_axis=%.6f dt=[%.4f, %.4f]",
+                        kalman_position_process_noise_,
+                        kalman_position_measurement_noise_,
+                        kalman_axis_process_noise_,
+                        kalman_axis_measurement_noise_,
+                        kalman_min_dt_,
+                        kalman_max_dt_);
+        }
+        RCLCPP_INFO(this->get_logger(), "Ceres params: iter=%d points=%d w2d=%.3f wpos=%.3f",
+                    ceres_max_iterations_, ceres_max_points_, ceres_weight_2d_, ceres_weight_pos_);
 
         rclcpp::QoS qos(rclcpp::KeepLast(5));
         // message_filters subscribers
@@ -228,6 +265,7 @@ namespace axispose
             auto tup = benchmark_->run(benchmarkLabel(), [this, &valid_cloud, &mask_cv, &depth_msg]()
                                        {
                 auto p = this->computePoseByAlgorithm(valid_cloud, mask_cv, depth_msg->header.stamp);
+                p = this->applyKalmanFilterToPose(p, depth_msg->header.stamp);
                 return std::make_tuple(p, static_cast<size_t>(valid_cloud->size())); }, [](const std::tuple<geometry_msgs::msg::PoseStamped, size_t> &t) -> std::vector<std::string>
                                        {
                 const auto &pose = std::get<0>(t).pose;
@@ -248,6 +286,7 @@ namespace axispose
         else
         {
             pose_msg = computePoseByAlgorithm(valid_cloud, mask_cv, depth_msg->header.stamp);
+            pose_msg = applyKalmanFilterToPose(pose_msg, depth_msg->header.stamp);
         }
         pose_msg.header.stamp = depth_msg->header.stamp;
         pose_msg.header.frame_id = have_intrinsics_color_ ? color_frame_id_ : frame_id_;
@@ -330,6 +369,171 @@ namespace axispose
             axis_history_valid_ = true;
         }
 
+        return out;
+    }
+
+    void PoseEstimateBase::kalmanPredictUpdate1D(double measurement,
+                                                 double dt,
+                                                 double process_noise,
+                                                 double measurement_noise,
+                                                 double &x,
+                                                 double &v,
+                                                 Eigen::Matrix2d &P) const
+    {
+        const double dt2 = dt * dt;
+        const double dt3 = dt2 * dt;
+        const double dt4 = dt2 * dt2;
+
+        const double x_pred = x + dt * v;
+        const double v_pred = v;
+
+        Eigen::Matrix2d F;
+        F << 1.0, dt,
+            0.0, 1.0;
+
+        Eigen::Matrix2d Q;
+        Q << 0.25 * dt4 * process_noise, 0.5 * dt3 * process_noise,
+            0.5 * dt3 * process_noise, dt2 * process_noise;
+
+        Eigen::Matrix2d P_pred = F * P * F.transpose() + Q;
+
+        const double innovation = measurement - x_pred;
+        const double S = P_pred(0, 0) + measurement_noise;
+        if (S <= 1e-12)
+        {
+            x = x_pred;
+            v = v_pred;
+            P = P_pred;
+            return;
+        }
+
+        const double k0 = P_pred(0, 0) / S;
+        const double k1 = P_pred(1, 0) / S;
+
+        x = x_pred + k0 * innovation;
+        v = v_pred + k1 * innovation;
+
+        Eigen::Matrix2d KH;
+        KH << k0, 0.0,
+            k1, 0.0;
+        P = (Eigen::Matrix2d::Identity() - KH) * P_pred;
+    }
+
+    void PoseEstimateBase::resetKalmanState(const Eigen::Vector3d &position, const Eigen::Vector3d &axis, double stamp_s)
+    {
+        kalman_initialized_ = true;
+        kalman_last_stamp_s_ = stamp_s;
+        kalman_pos_x_ = position;
+        kalman_pos_v_.setZero();
+        kalman_axis_x_ = axis;
+        kalman_axis_v_.setZero();
+
+        for (int i = 0; i < 3; ++i)
+        {
+            kalman_pos_P_[i] = Eigen::Matrix2d::Identity() * kalman_initial_covariance_;
+            kalman_axis_P_[i] = Eigen::Matrix2d::Identity() * kalman_initial_covariance_;
+        }
+    }
+
+    geometry_msgs::msg::PoseStamped PoseEstimateBase::applyKalmanFilterToPose(const geometry_msgs::msg::PoseStamped &raw_pose, const rclcpp::Time &stamp)
+    {
+        if (!kalman_enabled_)
+        {
+            return raw_pose;
+        }
+
+        const auto &rp = raw_pose.pose;
+        const Eigen::Vector3d raw_pos(rp.position.x, rp.position.y, rp.position.z);
+        if (!std::isfinite(raw_pos.x()) || !std::isfinite(raw_pos.y()) || !std::isfinite(raw_pos.z()))
+        {
+            return raw_pose;
+        }
+
+        Eigen::Quaterniond q_raw(rp.orientation.w, rp.orientation.x, rp.orientation.y, rp.orientation.z);
+        if (q_raw.norm() <= 1e-9)
+        {
+            return raw_pose;
+        }
+        q_raw.normalize();
+        Eigen::Vector3d raw_axis = q_raw.toRotationMatrix().col(0).normalized();
+        if (!std::isfinite(raw_axis.x()) || !std::isfinite(raw_axis.y()) || !std::isfinite(raw_axis.z()))
+        {
+            return raw_pose;
+        }
+
+        const double stamp_s = stamp.seconds();
+        if (!kalman_initialized_ || stamp_s <= 0.0)
+        {
+            Eigen::Vector3d axis0 = stabilizeAxisDirection(raw_axis, &raw_axis);
+            resetKalmanState(raw_pos, axis0, stamp_s);
+            geometry_msgs::msg::PoseStamped out = raw_pose;
+            out.pose.orientation.x = q_raw.x();
+            out.pose.orientation.y = q_raw.y();
+            out.pose.orientation.z = q_raw.z();
+            out.pose.orientation.w = q_raw.w();
+            return out;
+        }
+
+        double dt = stamp_s - kalman_last_stamp_s_;
+        if (!std::isfinite(dt) || dt <= 0.0)
+        {
+            dt = kalman_min_dt_;
+        }
+        if (dt < kalman_min_dt_)
+            dt = kalman_min_dt_;
+        if (dt > kalman_max_dt_)
+            dt = kalman_max_dt_;
+
+        Eigen::Vector3d axis_meas = raw_axis;
+        if (axis_meas.dot(kalman_axis_x_) < 0.0)
+        {
+            axis_meas = -axis_meas;
+        }
+
+        for (int i = 0; i < 3; ++i)
+        {
+            kalmanPredictUpdate1D(raw_pos[i], dt, kalman_position_process_noise_, kalman_position_measurement_noise_,
+                                  kalman_pos_x_[i], kalman_pos_v_[i], kalman_pos_P_[i]);
+            kalmanPredictUpdate1D(axis_meas[i], dt, kalman_axis_process_noise_, kalman_axis_measurement_noise_,
+                                  kalman_axis_x_[i], kalman_axis_v_[i], kalman_axis_P_[i]);
+        }
+        kalman_last_stamp_s_ = stamp_s;
+
+        Eigen::Vector3d filtered_axis = kalman_axis_x_;
+        const double axis_norm = filtered_axis.norm();
+        if (axis_norm > 1e-9)
+        {
+            filtered_axis /= axis_norm;
+        }
+        else
+        {
+            filtered_axis = axis_meas;
+        }
+        filtered_axis = stabilizeAxisDirection(filtered_axis, &axis_meas);
+
+        Eigen::Vector3d up = Eigen::Vector3d::UnitY();
+        if (std::abs(filtered_axis.dot(up)) > 0.99)
+        {
+            up = Eigen::Vector3d::UnitZ();
+        }
+        Eigen::Vector3d axis_y = (up - up.dot(filtered_axis) * filtered_axis).normalized();
+        Eigen::Vector3d axis_z = filtered_axis.cross(axis_y).normalized();
+
+        Eigen::Matrix3d R;
+        R.col(0) = filtered_axis;
+        R.col(1) = axis_y;
+        R.col(2) = axis_z;
+        Eigen::Quaterniond q_filtered(R);
+        q_filtered.normalize();
+
+        geometry_msgs::msg::PoseStamped out = raw_pose;
+        out.pose.position.x = kalman_pos_x_.x();
+        out.pose.position.y = kalman_pos_x_.y();
+        out.pose.position.z = kalman_pos_x_.z();
+        out.pose.orientation.x = q_filtered.x();
+        out.pose.orientation.y = q_filtered.y();
+        out.pose.orientation.z = q_filtered.z();
+        out.pose.orientation.w = q_filtered.w();
         return out;
     }
 
@@ -528,17 +732,23 @@ namespace axispose
         geometry_msgs::msg::PoseStamped pose;
         (void)stamp;
 
-        axispose::GaussianMapSolver solver;
-        Eigen::Vector3f out_axis, out_point;
-        float out_radius = 0.05f;
-
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_ptr(new pcl::PointCloud<pcl::PointXYZ>(*cloud));
-        if (!solver.estimateAxis(cloud_ptr, out_axis, out_point, out_radius))
+
+        // Ceres initialization: use PCA axis + centroid as line point for robustness.
+        Eigen::Vector4f centroid4;
+        pcl::compute3DCentroid(*cloud_ptr, centroid4);
+        Eigen::Matrix3f covariance;
+        pcl::computeCovarianceMatrixNormalized(*cloud_ptr, centroid4, covariance);
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> eig(covariance);
+        Eigen::Vector3d pca_axis = eig.eigenvectors().col(2).cast<double>().normalized();
+        if (!std::isfinite(pca_axis.x()) || !std::isfinite(pca_axis.y()) || !std::isfinite(pca_axis.z()))
         {
-            RCLCPP_WARN(this->get_logger(), "GaussianMapSolver failed");
-            return pose;
+            RCLCPP_WARN(this->get_logger(), "Ceres skipped: invalid PCA init, fallback PCA pose");
+            return computePoseFromCloud(cloud, stamp);
         }
-        (void)out_radius;
+        Eigen::Vector3d d = stabilizeAxisDirection(pca_axis, nullptr).normalized();
+        Eigen::Vector3d p = centroid4.head<3>().cast<double>();
+        Eigen::Vector3d m = p.cross(d);
 
         // Fit a 2D line from YOLO mask as supervision: A*u + B*v + C = 0.
         std::vector<cv::Point> nz;
@@ -546,7 +756,7 @@ namespace axispose
         if (nz.size() < 20)
         {
             RCLCPP_WARN(this->get_logger(), "Ceres skipped: not enough mask points (%zu)", nz.size());
-            return computePoseGaussian(cloud, mask_cv, stamp);
+            return computePoseFromCloud(cloud, stamp);
         }
 
         cv::Vec4f line;
@@ -559,16 +769,12 @@ namespace axispose
         if (norm_v < 1e-8)
         {
             RCLCPP_WARN(this->get_logger(), "Ceres skipped: invalid fitted 2D line");
-            return computePoseGaussian(cloud, mask_cv, stamp);
+            return computePoseFromCloud(cloud, stamp);
         }
 
         Eigen::Vector3d line2d_abc;
         line2d_abc << -vy, vx, (vy * x0 - vx * y0);
         line2d_abc /= std::sqrt(line2d_abc.x() * line2d_abc.x() + line2d_abc.y() * line2d_abc.y());
-
-        Eigen::Vector3d d = out_axis.cast<double>().normalized();
-        Eigen::Vector3d p = out_point.cast<double>();
-        Eigen::Vector3d m = p.cross(d);
 
         const cv::Mat &Kcv = have_intrinsics_color_ ? color_camera_matrix_ : depth_camera_matrix_;
         Eigen::Matrix3d K = Eigen::Matrix3d::Identity();
@@ -578,20 +784,24 @@ namespace axispose
         K(1, 2) = Kcv.at<double>(1, 2);
 
         axispose::CeresJointOptimizer optimizer;
-        const bool ok = optimizer.optimizePose(d, m, cloud_ptr, K, line2d_abc, p, 50, 90, 3.0, 20.0);
+        const bool ok = optimizer.optimizePose(
+            d,
+            m,
+            cloud_ptr,
+            K,
+            line2d_abc,
+            p,
+            std::max(1, ceres_max_iterations_),
+            std::max(8, ceres_max_points_),
+            std::max(0.0, ceres_weight_2d_),
+            std::max(0.0, ceres_weight_pos_));
         if (!ok)
         {
-            RCLCPP_WARN(this->get_logger(), "Ceres optimizer failed, fallback to Gaussian pose");
-            return computePoseGaussian(cloud, mask_cv, stamp);
+            RCLCPP_WARN(this->get_logger(), "Ceres optimizer failed, fallback to PCA pose");
+            return computePoseFromCloud(cloud, stamp);
         }
 
         // Disambiguate line direction sign using current-frame PCA + temporal history.
-        Eigen::Vector4f centroid4;
-        pcl::compute3DCentroid(*cloud_ptr, centroid4);
-        Eigen::Matrix3f covariance;
-        pcl::computeCovarianceMatrixNormalized(*cloud_ptr, centroid4, covariance);
-        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> eig(covariance);
-        Eigen::Vector3d pca_axis = eig.eigenvectors().col(2).cast<double>().normalized();
         d = stabilizeAxisDirection(d, &pca_axis).normalized();
 
         // Recover line point from optimized Plucker (d, m), then anchor near cloud centroid.

@@ -1,5 +1,9 @@
 #include "axispose/seg.hpp"
 
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
 
@@ -15,16 +19,42 @@ namespace axispose
             ROS_ERROR("Parameter 'engine' is required.");
             throw std::runtime_error("Parameter 'engine' is required.");
         }
+        if (!std::filesystem::exists(engine_path))
+        {
+            ROS_ERROR("Engine file does not exist: %s", engine_path.c_str());
+            throw std::runtime_error("Engine file missing: " + engine_path);
+        }
+
+        const auto preload = std::getenv("LD_PRELOAD");
+        if (!preload || std::string(preload).empty())
+        {
+            ROS_WARN("LD_PRELOAD is empty. CUDA plugin loading may fail on this platform.");
+        }
+        else
+        {
+            ROS_INFO("LD_PRELOAD=%s", preload);
+        }
+
         std::string image_topic_;
         pnh_.param<std::string>("image_topic", image_topic_, "/camera/rgb/image_raw");
 
         option_.enableSwapRB();
+        const auto load_t0 = std::chrono::steady_clock::now();
         model_ = std::make_unique<trtyolo::SegmentModel>(engine_path, option_);
+        const auto load_t1 = std::chrono::steady_clock::now();
+        const double load_ms = std::chrono::duration<double, std::milli>(load_t1 - load_t0).count();
+
+        std::error_code ec;
+        const auto engine_size = std::filesystem::file_size(engine_path, ec);
 
         sub_ = nh_.subscribe(image_topic_, 5, &SegmentNode::imageCallback, this);
         pub_ = nh_.advertise<sensor_msgs::Image>("/yolo/mask", 1);
 
-        ROS_INFO("Segment node initialized. Engine: %s", engine_path.c_str());
+        ROS_INFO("Segment node initialized. Engine=%s size_bytes=%llu load_ms=%.2f image_topic=%s",
+                 engine_path.c_str(),
+                 static_cast<unsigned long long>(ec ? 0ULL : engine_size),
+                 load_ms,
+                 image_topic_.c_str());
     }
 
     void SegmentNode::imageCallback(const sensor_msgs::ImageConstPtr &msg)
@@ -33,7 +63,11 @@ namespace axispose
         {
             cv::Mat image = cv_bridge::toCvShare(msg, "bgr8")->image;
             trtyolo::Image input(image.data, image.cols, image.rows);
+
+            const auto infer_t0 = std::chrono::steady_clock::now();
             auto result = model_->predict(input);
+            const auto infer_t1 = std::chrono::steady_clock::now();
+            const double infer_ms = std::chrono::duration<double, std::milli>(infer_t1 - infer_t0).count();
 
             cv::Mat mask(image.rows, image.cols, CV_8UC1, cv::Scalar(0));
 
@@ -77,6 +111,23 @@ namespace axispose
                 cv::Mat src = bool_mask(source_rect);
                 cv::bitwise_or(roi, src, roi);
             }
+
+            const int mask_pixels = cv::countNonZero(mask);
+            ++frames_in_;
+            if (first_frame_stamp_.isZero())
+            {
+                first_frame_stamp_ = ros::Time::now();
+            }
+            const double elapsed = std::max(1e-3, (ros::Time::now() - first_frame_stamp_).toSec());
+            const double fps = static_cast<double>(frames_in_) / elapsed;
+
+            if (!first_infer_logged_)
+            {
+                first_infer_logged_ = true;
+                ROS_INFO("First inference done: infer_ms=%.3f detections=%zu mask_pixels=%d", infer_ms, result.num, mask_pixels);
+            }
+            ROS_INFO_THROTTLE(5.0, "Segment runtime: fps=%.2f infer_ms=%.3f detections=%zu mask_pixels=%d",
+                              fps, infer_ms, result.num, mask_pixels);
 
             auto out_msg = cv_bridge::CvImage(msg->header, "mono8", mask).toImageMsg();
             pub_.publish(*out_msg);

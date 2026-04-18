@@ -68,6 +68,8 @@ def main() -> int:
     gt_camera_info = str((root / ecfg.get("groundtruth_camera_info_file", "config/d457_color.yaml")).resolve())
     gt_layout = str((root / ecfg.get("groundtruth_layout_file", "tools/apriltag.yaml")).resolve())
     gt_min_tags = int(ecfg.get("groundtruth_min_tags", 4))
+    aggregate_enabled = bool(ecfg.get("aggregate_summary_enabled", True))
+    aggregate_plots_enabled = bool(ecfg.get("aggregate_summary_plots_enabled", True))
 
     if args.dry_run:
         print("Dry-run summary:")
@@ -80,12 +82,29 @@ def main() -> int:
         print(f"  algorithms: {algorithms}")
         print(f"  line2d_eval_enabled: {line2d_enabled}")
         print(f"  groundtruth_eval_enabled: {gt_enabled}")
+        print(f"  aggregate_summary_enabled: {aggregate_enabled}")
+        print(f"  aggregate_summary_plots_enabled: {aggregate_plots_enabled}")
         return 0
 
     for alg in algorithms:
         plugin = plugin_for_algorithm(alg)
         out_dir = out_root / alg
         out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Avoid mixing previous runs when reusing an existing --out-root.
+        stale_files = [
+            out_dir / "metrics.csv",
+            out_dir / "line2d_metrics.csv",
+            out_dir / "line2d_summary.csv",
+            out_dir / "gt_eval" / "groundtruth.csv",
+            out_dir / "gt_eval" / "groundtruth_averaged.csv",
+            out_dir / "gt_eval" / "aligned.csv",
+            out_dir / "gt_eval" / "per_frame_errors.csv",
+            out_dir / "gt_eval" / "evaluation_summary.csv",
+        ]
+        for f in stale_files:
+            if f.exists() and f.is_file():
+                f.unlink()
 
         print("=" * 50)
         print(f"[RUN] algorithm={alg} plugin={plugin} out={out_dir}")
@@ -164,6 +183,21 @@ def main() -> int:
                 rc = run_cmd(eval_cmd, root)
                 if rc != 0:
                     return rc
+
+    if aggregate_enabled:
+        summary_cmd = (
+            f"python3 '{root / 'tools/summarize_eval_results.py'}' "
+            f"--out-root '{out_root}'"
+        )
+        if not aggregate_plots_enabled:
+            summary_cmd += " --no-plots"
+
+        print("=" * 50)
+        print(f"[POST] aggregate summary for out_root={out_root}")
+        print("=" * 50)
+        rc = run_cmd(summary_cmd, root)
+        if rc != 0:
+            return rc
 
     print(f"All done. Output root: {out_root}")
     return 0

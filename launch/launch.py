@@ -20,10 +20,10 @@ def generate_launch_description():
     pkg_directory = os.path.join(pkg_share, '..', '..', '..', '..')
 
     # 默认图片目录在包内 image1/rgb 和 image1/depth（真实数据）
-    default_rgb = os.path.join(pkg_directory, 'image_tag', 'rgb')
-    default_depth = os.path.join(pkg_directory, 'image_tag', 'depth')
+    default_rgb = os.path.join(pkg_directory, 'image_tag_accurate', 'rgb')
+    default_depth = os.path.join(pkg_directory, 'image_tag_accurate', 'depth')
     default_engine = os.path.join(
-        pkg_directory, 'engine', 'occlusion.engine')
+        pkg_directory, 'engine', 'best50.engine')
     default_statistic = os.path.join(
         pkg_directory, 'statistics')
 
