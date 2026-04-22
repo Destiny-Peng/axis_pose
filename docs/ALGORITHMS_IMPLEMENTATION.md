@@ -23,19 +23,6 @@
   - `src/poseEstimate.cpp`
   - 点云预处理中 cluster+rasa c内点逻辑：`PoseEstimate::denoisePointCloud`
 
-## 3. Gaussian（法向空间）
-- 原理：圆柱面法向量在高斯球上落在大圆；通过法向协方差最小特征向量求轴向。
-- 关键实现：
-  - 法向估计（organized 用积分法，unorganized 用KNN）
-  - 两阶段求解：全体法向初解 + 正交约束筛选后复解
-  - 点位估计：轴点用质心锚定，半径用径向距离中位数估计
-- 节点类：`PoseEstimateGaussian`
-- 实现入口：`PoseEstimateBase::computePoseGaussian`
-- 代码位置：
-  - `src/gaussian_map_solver.cpp`
-  - `include/axispose/gaussian_map_solver.hpp`
-  - `src/poseEstimate.cpp`
-
 ## 4. Ceres（3D+2D联合优化）
 - 原理：
   - 3D 约束：点到线残差（Plücker 表达）
