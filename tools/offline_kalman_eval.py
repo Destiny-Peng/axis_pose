@@ -15,6 +15,8 @@ Batch mode (recommended):
 import argparse
 import csv
 import math
+import contextlib
+import io
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -166,6 +168,36 @@ def quat_from_axis_x(axis):
     return q
 
 
+def mean_quaternion(quaternions):
+    valid = []
+    for q in quaternions:
+        nq = quat_norm(q)
+        if nq is not None:
+            valid.append(nq)
+    if not valid:
+        return None
+
+    ref = valid[0]
+    sx = sy = sz = sw = 0.0
+    for q in valid:
+        if ref[0] * q[0] + ref[1] * q[1] + ref[2] * q[2] + ref[3] * q[3] < 0.0:
+            q = (-q[0], -q[1], -q[2], -q[3])
+        sx += q[0]
+        sy += q[1]
+        sz += q[2]
+        sw += q[3]
+
+    return quat_norm((sx / len(valid), sy / len(valid), sz / len(valid), sw / len(valid)))
+
+
+def mean_pose_reference(rows):
+    if not rows:
+        return None, None
+    mean_xyz = (mean([r["x"] for r in rows]), mean([r["y"] for r in rows]), mean([r["z"] for r in rows]))
+    mean_q = mean_quaternion([r["q"] for r in rows])
+    return mean_xyz, mean_q
+
+
 def split_sessions(rows, gap_sec):
     if not rows:
         return []
@@ -229,87 +261,136 @@ def kf_predict_update_1d(st: KF1D, z, dt, q, r):
     st.p11 = p11 - k1 * p01
 
 
-def evaluate_jumps(rows, pos_jump_mm, ang_jump_deg, mad_k):
-    pos_deltas = []
-    ang_deltas = []
-    per_step = []
+def evaluate_mean_deviation(rows, pos_jump_mm, ang_jump_deg, mad_k):
+    mean_xyz, mean_q = mean_pose_reference(rows)
+    if not rows or mean_xyz is None:
+        return {
+            "pose_count": 0,
+            "reference_mode": "mean_pose",
+            "reference_pos_x_m": None,
+            "reference_pos_y_m": None,
+            "reference_pos_z_m": None,
+            "reference_qx": None,
+            "reference_qy": None,
+            "reference_qz": None,
+            "reference_qw": None,
+            "jump_count": 0,
+            "jump_rate": 0.0,
+            "stable_ratio": 0.0,
+            "pos_dev_mean_mm": None,
+            "pos_dev_max_mm": None,
+            "pos_dev_p95_mm": None,
+            "ang_dev_mean_deg": None,
+            "ang_dev_max_deg": None,
+            "ang_dev_p95_deg": None,
+            "jump_pos_threshold_mm": pos_jump_mm,
+            "jump_ang_threshold_deg": ang_jump_deg,
+            "per_frame": [],
+        }
 
-    for i in range(1, len(rows)):
-        a = rows[i - 1]
-        b = rows[i]
-        dx = b["x"] - a["x"]
-        dy = b["y"] - a["y"]
-        dz = b["z"] - a["z"]
-        pos_mm = vec_norm3(dx, dy, dz) * 1000.0
-        ang_deg = quat_angle_deg(a["q"], b["q"])
+    ref_x, ref_y, ref_z = mean_xyz
+    ref_qx = ref_qy = ref_qz = ref_qw = None
+    if mean_q is not None:
+        ref_qx, ref_qy, ref_qz, ref_qw = mean_q
+
+    pos_devs = []
+    ang_devs = []
+    per_frame = []
+
+    for i, row in enumerate(rows):
+        pos_mm = vec_norm3(row["x"] - ref_x, row["y"] - ref_y, row["z"] - ref_z) * 1000.0
+        ang_deg = quat_angle_deg(row["q"], mean_q) if mean_q is not None else None
+        pos_devs.append(pos_mm)
         if ang_deg is not None:
-            ang_deltas.append(ang_deg)
-        pos_deltas.append(pos_mm)
-        per_step.append((pos_mm, ang_deg))
+            ang_devs.append(ang_deg)
+        per_frame.append(
+            {
+                "index": i,
+                "run_id": row.get("run_id", ""),
+                "timestamp_iso": row.get("timestamp_iso", ""),
+                "pos_dev_mm": pos_mm,
+                "ang_dev_deg": ang_deg,
+                "is_jump_pos": 0,
+                "is_jump_ang": 0,
+                "is_jump": 0,
+                "pose_x": row["x"],
+                "pose_y": row["y"],
+                "pose_z": row["z"],
+                "qx": row["q"][0],
+                "qy": row["q"][1],
+                "qz": row["q"][2],
+                "qw": row["q"][3],
+            }
+        )
 
-    pos_thr = robust_jump_threshold(pos_deltas, pos_jump_mm, mad_k)
-    ang_thr = robust_jump_threshold(ang_deltas, ang_jump_deg, mad_k)
+    pos_thr = robust_jump_threshold(pos_devs, pos_jump_mm, mad_k)
+    ang_thr = robust_jump_threshold(ang_devs, ang_jump_deg, mad_k)
 
     jump_count = 0
-    jump_flags = []
-    for pos_mm, ang_deg in per_step:
-        is_jump_pos = int(pos_mm > pos_thr)
-        is_jump_ang = int((ang_deg is not None) and (ang_deg > ang_thr))
-        is_jump = int(is_jump_pos or is_jump_ang)
-        jump_count += is_jump
-        jump_flags.append((is_jump_pos, is_jump_ang, is_jump))
+    for row in per_frame:
+        is_jump_pos = int(row["pos_dev_mm"] > pos_thr)
+        is_jump_ang = int((row["ang_dev_deg"] is not None) and (row["ang_dev_deg"] > ang_thr))
+        row["is_jump_pos"] = is_jump_pos
+        row["is_jump_ang"] = is_jump_ang
+        row["is_jump"] = int(is_jump_pos or is_jump_ang)
+        jump_count += row["is_jump"]
 
-    denom = max(1, len(rows) - 1)
+    denom = max(1, len(rows))
     return {
         "pose_count": len(rows),
+        "reference_mode": "mean_pose",
+        "reference_pos_x_m": ref_x,
+        "reference_pos_y_m": ref_y,
+        "reference_pos_z_m": ref_z,
+        "reference_qx": ref_qx,
+        "reference_qy": ref_qy,
+        "reference_qz": ref_qz,
+        "reference_qw": ref_qw,
         "jump_count": jump_count,
         "jump_rate": float(jump_count) / float(denom),
         "stable_ratio": 1.0 - float(jump_count) / float(denom),
-        "pos_delta_mean_mm": mean(pos_deltas) if pos_deltas else None,
-        "pos_delta_max_mm": max(pos_deltas) if pos_deltas else None,
-        "pos_delta_p95_mm": percentile(pos_deltas, 95) if pos_deltas else None,
-        "ang_delta_mean_deg": mean(ang_deltas) if ang_deltas else None,
-        "ang_delta_max_deg": max(ang_deltas) if ang_deltas else None,
-        "ang_delta_p95_deg": percentile(ang_deltas, 95) if ang_deltas else None,
+        "pos_dev_mean_mm": mean(pos_devs) if pos_devs else None,
+        "pos_dev_max_mm": max(pos_devs) if pos_devs else None,
+        "pos_dev_p95_mm": percentile(pos_devs, 95) if pos_devs else None,
+        "ang_dev_mean_deg": mean(ang_devs) if ang_devs else None,
+        "ang_dev_max_deg": max(ang_devs) if ang_devs else None,
+        "ang_dev_p95_deg": percentile(ang_devs, 95) if ang_devs else None,
         "jump_pos_threshold_mm": pos_thr,
         "jump_ang_threshold_deg": ang_thr,
-        "per_step": per_step,
-        "jump_flags": jump_flags,
+        "per_frame": per_frame,
     }
 
 
 def write_step_delta_csv(path, raw_stat, filt_stat):
     rows = []
-    n = min(len(raw_stat["per_step"]), len(filt_stat["per_step"]))
+    n = min(len(raw_stat["per_frame"]), len(filt_stat["per_frame"]))
     for i in range(n):
-        raw_pos, raw_ang = raw_stat["per_step"][i]
-        kf_pos, kf_ang = filt_stat["per_step"][i]
-        raw_jump_pos, raw_jump_ang, raw_jump = raw_stat["jump_flags"][i]
-        kf_jump_pos, kf_jump_ang, kf_jump = filt_stat["jump_flags"][i]
+        raw_row = raw_stat["per_frame"][i]
+        kf_row = filt_stat["per_frame"][i]
         rows.append(
             {
-                "step_index": i + 1,
-                "raw_pos_delta_mm": raw_pos,
-                "kf_pos_delta_mm": kf_pos,
-                "raw_ang_delta_deg": raw_ang,
-                "kf_ang_delta_deg": kf_ang,
-                "raw_jump_pos": raw_jump_pos,
-                "raw_jump_ang": raw_jump_ang,
-                "raw_jump": raw_jump,
-                "kf_jump_pos": kf_jump_pos,
-                "kf_jump_ang": kf_jump_ang,
-                "kf_jump": kf_jump,
+                "frame_index": i + 1,
+                "raw_pos_dev_mm": raw_row["pos_dev_mm"],
+                "kf_pos_dev_mm": kf_row["pos_dev_mm"],
+                "raw_ang_dev_deg": raw_row["ang_dev_deg"],
+                "kf_ang_dev_deg": kf_row["ang_dev_deg"],
+                "raw_jump_pos": raw_row["is_jump_pos"],
+                "raw_jump_ang": raw_row["is_jump_ang"],
+                "raw_jump": raw_row["is_jump"],
+                "kf_jump_pos": kf_row["is_jump_pos"],
+                "kf_jump_ang": kf_row["is_jump_ang"],
+                "kf_jump": kf_row["is_jump"],
             }
         )
 
     write_csv(
         path,
         [
-            "step_index",
-            "raw_pos_delta_mm",
-            "kf_pos_delta_mm",
-            "raw_ang_delta_deg",
-            "kf_ang_delta_deg",
+            "frame_index",
+            "raw_pos_dev_mm",
+            "kf_pos_dev_mm",
+            "raw_ang_dev_deg",
+            "kf_ang_dev_deg",
             "raw_jump_pos",
             "raw_jump_ang",
             "raw_jump",
@@ -322,12 +403,16 @@ def write_step_delta_csv(path, raw_stat, filt_stat):
 
 
 def write_plots(plot_dir, raw_stat, filt_stat):
+    if plt is None:
+        print(f"WARN: matplotlib unavailable, skip plots: {plot_dir}")
+        return
+
     plot_dir.mkdir(parents=True, exist_ok=True)
 
-    raw_pos = [v[0] for v in raw_stat["per_step"]]
-    kf_pos = [v[0] for v in filt_stat["per_step"]]
-    raw_ang = [v[1] for v in raw_stat["per_step"] if v[1] is not None]
-    kf_ang = [v[1] for v in filt_stat["per_step"] if v[1] is not None]
+    raw_pos = [v["pos_dev_mm"] for v in raw_stat["per_frame"]]
+    kf_pos = [v["pos_dev_mm"] for v in filt_stat["per_frame"]]
+    raw_ang = [v["ang_dev_deg"] for v in raw_stat["per_frame"] if v["ang_dev_deg"] is not None]
+    kf_ang = [v["ang_dev_deg"] for v in filt_stat["per_frame"] if v["ang_dev_deg"] is not None]
 
     xs = list(range(1, len(raw_pos) + 1))
     plt.figure(figsize=(11, 4.5))
@@ -335,8 +420,8 @@ def write_plots(plot_dir, raw_stat, filt_stat):
     plt.plot(xs, kf_pos, label="kalman", linewidth=1.2)
     plt.axhline(raw_stat["jump_pos_threshold_mm"], linestyle="--", linewidth=1.0, label="raw_thr")
     plt.axhline(filt_stat["jump_pos_threshold_mm"], linestyle=":", linewidth=1.0, label="kf_thr")
-    plt.title("Position Delta per Step (mm)")
-    plt.xlabel("step index")
+    plt.title("Position Deviation per Frame from Mean (mm)")
+    plt.xlabel("frame index")
     plt.ylabel("mm")
     plt.grid(alpha=0.25)
     plt.legend()
@@ -350,8 +435,8 @@ def write_plots(plot_dir, raw_stat, filt_stat):
     plt.plot(xs_ang, kf_ang, label="kalman", linewidth=1.2)
     plt.axhline(raw_stat["jump_ang_threshold_deg"], linestyle="--", linewidth=1.0, label="raw_thr")
     plt.axhline(filt_stat["jump_ang_threshold_deg"], linestyle=":", linewidth=1.0, label="kf_thr")
-    plt.title("Angular Delta per Step (deg)")
-    plt.xlabel("step index")
+    plt.title("Angular Deviation per Frame from Mean (deg)")
+    plt.xlabel("frame index")
     plt.ylabel("deg")
     plt.grid(alpha=0.25)
     plt.legend()
@@ -361,20 +446,20 @@ def write_plots(plot_dir, raw_stat, filt_stat):
 
     labels = ["pos_mean", "pos_p95", "pos_max", "ang_mean", "ang_p95", "ang_max"]
     raw_bar = [
-        raw_stat["pos_delta_mean_mm"],
-        raw_stat["pos_delta_p95_mm"],
-        raw_stat["pos_delta_max_mm"],
-        raw_stat["ang_delta_mean_deg"],
-        raw_stat["ang_delta_p95_deg"],
-        raw_stat["ang_delta_max_deg"],
+        raw_stat["pos_dev_mean_mm"],
+        raw_stat["pos_dev_p95_mm"],
+        raw_stat["pos_dev_max_mm"],
+        raw_stat["ang_dev_mean_deg"],
+        raw_stat["ang_dev_p95_deg"],
+        raw_stat["ang_dev_max_deg"],
     ]
     kf_bar = [
-        filt_stat["pos_delta_mean_mm"],
-        filt_stat["pos_delta_p95_mm"],
-        filt_stat["pos_delta_max_mm"],
-        filt_stat["ang_delta_mean_deg"],
-        filt_stat["ang_delta_p95_deg"],
-        filt_stat["ang_delta_max_deg"],
+        filt_stat["pos_dev_mean_mm"],
+        filt_stat["pos_dev_p95_mm"],
+        filt_stat["pos_dev_max_mm"],
+        filt_stat["ang_dev_mean_deg"],
+        filt_stat["ang_dev_p95_deg"],
+        filt_stat["ang_dev_max_deg"],
     ]
     x = list(range(len(labels)))
     w = 0.4
@@ -382,7 +467,7 @@ def write_plots(plot_dir, raw_stat, filt_stat):
     plt.bar([i - w / 2 for i in x], raw_bar, width=w, label="raw")
     plt.bar([i + w / 2 for i in x], kf_bar, width=w, label="kalman")
     plt.xticks(x, labels)
-    plt.title("Raw vs Kalman Summary Metrics")
+    plt.title("Raw vs Kalman Summary Deviations from Mean")
     plt.grid(axis="y", alpha=0.25)
     plt.legend()
     plt.tight_layout()
@@ -575,12 +660,12 @@ def process_metrics_csv(metrics_csv, output_dir, args, algorithm_name=""):
     sessions = split_sessions(all_pose, args.session_gap_sec)
     selected = sessions[-1] if args.session_mode == "latest" else all_pose
 
-    raw_rows = [{"x": r["x"], "y": r["y"], "z": r["z"], "q": r["q"]} for r in selected]
+    raw_rows = [{"x": r["x"], "y": r["y"], "z": r["z"], "q": r["q"], "run_id": r["run_id"], "timestamp_iso": r["timestamp_iso"]} for r in selected]
     filtered, reject_stat = run_offline_kalman(selected, args)
-    filt_rows = [{"x": r["xf"], "y": r["yf"], "z": r["zf"], "q": r["qf"]} for r in filtered]
+    filt_rows = [{"x": r["xf"], "y": r["yf"], "z": r["zf"], "q": r["qf"], "run_id": r["run_id"], "timestamp_iso": r["timestamp_iso"]} for r in filtered]
 
-    raw_stat = evaluate_jumps(raw_rows, args.pos_jump_mm, args.ang_jump_deg, args.jump_mad_k)
-    filt_stat = evaluate_jumps(filt_rows, args.pos_jump_mm, args.ang_jump_deg, args.jump_mad_k)
+    raw_stat = evaluate_mean_deviation(raw_rows, args.pos_jump_mm, args.ang_jump_deg, args.jump_mad_k)
+    filt_stat = evaluate_mean_deviation(filt_rows, args.pos_jump_mm, args.ang_jump_deg, args.jump_mad_k)
 
     pose_out = []
     for i, r in enumerate(filtered):
@@ -631,6 +716,7 @@ def process_metrics_csv(metrics_csv, output_dir, args, algorithm_name=""):
         "session_mode": args.session_mode,
         "session_count_detected": len(sessions),
         "pose_count_used": len(selected),
+        "reference_mode": raw_stat["reference_mode"],
         "hard_reject_ang_deg": args.hard_reject_ang_deg,
         "rejected_count": reject_stat["rejected_count"],
         "rejected_ratio": (float(reject_stat["rejected_count"]) / float(max(1, len(selected) - 1))),
@@ -638,22 +724,36 @@ def process_metrics_csv(metrics_csv, output_dir, args, algorithm_name=""):
         "kf_jump_rate": filt_stat["jump_rate"],
         "raw_stable_ratio": raw_stat["stable_ratio"],
         "kf_stable_ratio": filt_stat["stable_ratio"],
-        "raw_pos_delta_mean_mm": raw_stat["pos_delta_mean_mm"],
-        "kf_pos_delta_mean_mm": filt_stat["pos_delta_mean_mm"],
-        "raw_pos_delta_p95_mm": raw_stat["pos_delta_p95_mm"],
-        "kf_pos_delta_p95_mm": filt_stat["pos_delta_p95_mm"],
-        "raw_pos_delta_max_mm": raw_stat["pos_delta_max_mm"],
-        "kf_pos_delta_max_mm": filt_stat["pos_delta_max_mm"],
-        "raw_ang_delta_mean_deg": raw_stat["ang_delta_mean_deg"],
-        "kf_ang_delta_mean_deg": filt_stat["ang_delta_mean_deg"],
-        "raw_ang_delta_p95_deg": raw_stat["ang_delta_p95_deg"],
-        "kf_ang_delta_p95_deg": filt_stat["ang_delta_p95_deg"],
-        "raw_ang_delta_max_deg": raw_stat["ang_delta_max_deg"],
-        "kf_ang_delta_max_deg": filt_stat["ang_delta_max_deg"],
+        "raw_pos_dev_mean_mm": raw_stat["pos_dev_mean_mm"],
+        "kf_pos_dev_mean_mm": filt_stat["pos_dev_mean_mm"],
+        "raw_pos_dev_p95_mm": raw_stat["pos_dev_p95_mm"],
+        "kf_pos_dev_p95_mm": filt_stat["pos_dev_p95_mm"],
+        "raw_pos_dev_max_mm": raw_stat["pos_dev_max_mm"],
+        "kf_pos_dev_max_mm": filt_stat["pos_dev_max_mm"],
+        "raw_ang_dev_mean_deg": raw_stat["ang_dev_mean_deg"],
+        "kf_ang_dev_mean_deg": filt_stat["ang_dev_mean_deg"],
+        "raw_ang_dev_p95_deg": raw_stat["ang_dev_p95_deg"],
+        "kf_ang_dev_p95_deg": filt_stat["ang_dev_p95_deg"],
+        "raw_ang_dev_max_deg": raw_stat["ang_dev_max_deg"],
+        "kf_ang_dev_max_deg": filt_stat["ang_dev_max_deg"],
         "raw_jump_pos_threshold_mm": raw_stat["jump_pos_threshold_mm"],
         "kf_jump_pos_threshold_mm": filt_stat["jump_pos_threshold_mm"],
         "raw_jump_ang_threshold_deg": raw_stat["jump_ang_threshold_deg"],
         "kf_jump_ang_threshold_deg": filt_stat["jump_ang_threshold_deg"],
+        "raw_reference_pos_x_m": raw_stat["reference_pos_x_m"],
+        "raw_reference_pos_y_m": raw_stat["reference_pos_y_m"],
+        "raw_reference_pos_z_m": raw_stat["reference_pos_z_m"],
+        "raw_reference_qx": raw_stat["reference_qx"],
+        "raw_reference_qy": raw_stat["reference_qy"],
+        "raw_reference_qz": raw_stat["reference_qz"],
+        "raw_reference_qw": raw_stat["reference_qw"],
+        "kf_reference_pos_x_m": filt_stat["reference_pos_x_m"],
+        "kf_reference_pos_y_m": filt_stat["reference_pos_y_m"],
+        "kf_reference_pos_z_m": filt_stat["reference_pos_z_m"],
+        "kf_reference_qx": filt_stat["reference_qx"],
+        "kf_reference_qy": filt_stat["reference_qy"],
+        "kf_reference_qz": filt_stat["reference_qz"],
+        "kf_reference_qw": filt_stat["reference_qw"],
     }
 
     write_csv(output_dir / "summary.csv", list(summary.keys()), [summary])
@@ -663,6 +763,7 @@ def process_metrics_csv(metrics_csv, output_dir, args, algorithm_name=""):
     print(f"{prefix}Input: {metrics_csv}")
     print(f"{prefix}Session mode: {args.session_mode} (detected sessions={len(sessions)})")
     print(f"{prefix}Pose rows used: {len(selected)}")
+    print(f"{prefix}Reference mode: mean_pose")
     print(f"{prefix}Hard reject ang threshold (deg): {args.hard_reject_ang_deg}")
     print(f"{prefix}Rejected frames: {reject_stat['rejected_count']} / {max(0, len(selected) - 1)}")
     print(f"{prefix}Raw jump_rate: {raw_stat['jump_rate']:.4f}")
@@ -698,27 +799,41 @@ def merge_into_summary_csv(out_root, kalman_rows):
 
     base_rows = read_csv_rows(summary_csv)
     km = {r.get("algorithm", ""): r for r in kalman_rows}
-
     add_cols = [
         "kalman_hard_reject_ang_deg",
         "kalman_rejected_ratio",
         "kalman_kf_jump_rate",
         "kalman_kf_stable_ratio",
-        "kalman_kf_pos_delta_mean_mm",
-        "kalman_kf_pos_delta_p95_mm",
-        "kalman_kf_pos_delta_max_mm",
-        "kalman_kf_ang_delta_mean_deg",
-        "kalman_kf_ang_delta_p95_deg",
-        "kalman_kf_ang_delta_max_deg",
+        "kalman_kf_pos_dev_mean_mm",
+        "kalman_kf_pos_dev_p95_mm",
+        "kalman_kf_pos_dev_max_mm",
+        "kalman_kf_ang_dev_mean_deg",
+        "kalman_kf_ang_dev_p95_deg",
+        "kalman_kf_ang_dev_max_deg",
+    ]
+
+    # Remove legacy 'delta' columns from any existing base rows, then merge
+    legacy_prefixes = [
+        "pos_delta_",
+        "ang_delta_",
+        "kalman_kf_pos_delta_",
+        "kalman_kf_ang_delta_",
     ]
 
     if not base_rows:
         base_rows = [{"algorithm": r.get("algorithm", "")} for r in kalman_rows]
 
-    existing_algs = set()
+    # clean legacy columns
+    for row in base_rows:
+        for p in legacy_prefixes:
+            for k in [key for key in list(row.keys()) if key.startswith(p)]:
+                row.pop(k, None)
+
+    existing_algs = {row.get("algorithm", "") for row in base_rows}
+
+    # update existing rows with kalman stats
     for row in base_rows:
         alg = row.get("algorithm", "")
-        existing_algs.add(alg)
         k = km.get(alg)
         for c in add_cols:
             row.setdefault(c, "")
@@ -727,13 +842,14 @@ def merge_into_summary_csv(out_root, kalman_rows):
             row["kalman_rejected_ratio"] = k.get("rejected_ratio", "")
             row["kalman_kf_jump_rate"] = k.get("kf_jump_rate", "")
             row["kalman_kf_stable_ratio"] = k.get("kf_stable_ratio", "")
-            row["kalman_kf_pos_delta_mean_mm"] = k.get("kf_pos_delta_mean_mm", "")
-            row["kalman_kf_pos_delta_p95_mm"] = k.get("kf_pos_delta_p95_mm", "")
-            row["kalman_kf_pos_delta_max_mm"] = k.get("kf_pos_delta_max_mm", "")
-            row["kalman_kf_ang_delta_mean_deg"] = k.get("kf_ang_delta_mean_deg", "")
-            row["kalman_kf_ang_delta_p95_deg"] = k.get("kf_ang_delta_p95_deg", "")
-            row["kalman_kf_ang_delta_max_deg"] = k.get("kf_ang_delta_max_deg", "")
+            row["kalman_kf_pos_dev_mean_mm"] = k.get("kf_pos_dev_mean_mm", "")
+            row["kalman_kf_pos_dev_p95_mm"] = k.get("kf_pos_dev_p95_mm", "")
+            row["kalman_kf_pos_dev_max_mm"] = k.get("kf_pos_dev_max_mm", "")
+            row["kalman_kf_ang_dev_mean_deg"] = k.get("kf_ang_dev_mean_deg", "")
+            row["kalman_kf_ang_dev_p95_deg"] = k.get("kf_ang_dev_p95_deg", "")
+            row["kalman_kf_ang_dev_max_deg"] = k.get("kf_ang_dev_max_deg", "")
 
+    # append any new algs
     for alg, k in km.items():
         if alg in existing_algs:
             continue
@@ -743,12 +859,12 @@ def merge_into_summary_csv(out_root, kalman_rows):
             "kalman_rejected_ratio": k.get("rejected_ratio", ""),
             "kalman_kf_jump_rate": k.get("kf_jump_rate", ""),
             "kalman_kf_stable_ratio": k.get("kf_stable_ratio", ""),
-            "kalman_kf_pos_delta_mean_mm": k.get("kf_pos_delta_mean_mm", ""),
-            "kalman_kf_pos_delta_p95_mm": k.get("kf_pos_delta_p95_mm", ""),
-            "kalman_kf_pos_delta_max_mm": k.get("kf_pos_delta_max_mm", ""),
-            "kalman_kf_ang_delta_mean_deg": k.get("kf_ang_delta_mean_deg", ""),
-            "kalman_kf_ang_delta_p95_deg": k.get("kf_ang_delta_p95_deg", ""),
-            "kalman_kf_ang_delta_max_deg": k.get("kf_ang_delta_max_deg", ""),
+            "kalman_kf_pos_dev_mean_mm": k.get("kf_pos_dev_mean_mm", ""),
+            "kalman_kf_pos_dev_p95_mm": k.get("kf_pos_dev_p95_mm", ""),
+            "kalman_kf_pos_dev_max_mm": k.get("kf_pos_dev_max_mm", ""),
+            "kalman_kf_ang_dev_mean_deg": k.get("kf_ang_dev_mean_deg", ""),
+            "kalman_kf_ang_dev_p95_deg": k.get("kf_ang_dev_p95_deg", ""),
+            "kalman_kf_ang_dev_max_deg": k.get("kf_ang_dev_max_deg", ""),
         }
         base_rows.append(row)
 
@@ -768,10 +884,10 @@ def merge_into_summary_md(out_root, kalman_rows):
         "rejected_ratio",
         "kf_jump_rate",
         "kf_stable_ratio",
-        "kf_pos_delta_mean_mm",
-        "kf_pos_delta_p95_mm",
-        "kf_ang_delta_mean_deg",
-        "kf_ang_delta_p95_deg",
+        "kf_pos_dev_mean_mm",
+        "kf_pos_dev_p95_mm",
+        "kf_ang_dev_mean_deg",
+        "kf_ang_dev_p95_deg",
     ]
 
     table_lines = []
