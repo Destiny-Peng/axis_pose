@@ -22,9 +22,15 @@
     color_camera_info_topic: /camera/color/camera_info
     depth_camera_info_topic: /camera/depth/camera_info
     mask_topic: /yolo/mask
-    input_mode: driver
+    tracking_enabled: true
+    lost_grace_frames: 12
+    reacquire_confirm_frames: 2
+    iou_keep_min: 0.15
+    center_dist_max_ratio: 0.14
+    debug_topic: /yolo/seg_debug
+    input_mode: caminfo_only #input mode: 'driver'|'bag'|'caminfo_only'
     debug_flags: ["debug_cloud"]
-    save_visualization: true
+    save_visualization: false
     save_every_n: 1
     kalman_enabled: true
     kalman_position_process_noise: 0.001
@@ -34,7 +40,7 @@
     kalman_initial_covariance: 1.0
     kalman_min_dt: 0.001
     kalman_max_dt: 0.2
-    ceres_max_iterations: 50
-    ceres_max_points: 90
+    ceres_max_iterations: 100
+    ceres_max_points: 300
     ceres_weight_2d: 3.0
-    ceres_weight_pos: 20.0
+    ceres_weight_pos: 5.0

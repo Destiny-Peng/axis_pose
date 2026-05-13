@@ -23,7 +23,7 @@ def generate_launch_description():
     default_rgb = os.path.join(pkg_directory, 'image_tag_accurate', 'rgb')
     default_depth = os.path.join(pkg_directory, 'image_tag_accurate', 'depth')
     default_engine = os.path.join(
-        pkg_directory, 'engine', 'best50.engine')
+        pkg_directory, 'engine', 'conf50.engine')
     default_statistic = os.path.join(
         pkg_directory, 'statistics')
 
@@ -46,7 +46,7 @@ def generate_launch_description():
     statistic_directory_arg = DeclareLaunchArgument(
         'statistic_directory', default_value=default_statistic, description='统计信息文件路径')
     pose_plugin_arg = DeclareLaunchArgument(
-        'pose_plugin', default_value='axispose::PoseEstimateRANSAC',
+        'pose_plugin', default_value='axispose::PoseEstimateCeres',
         description='pose component plugin: axispose::PoseEstimatePCA|PoseEstimateRANSAC|PoseEstimateGaussian|PoseEstimateCeres')
     # Composable node 描述
     container = ComposableNodeContainer(
