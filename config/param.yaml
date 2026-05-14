@@ -3,7 +3,7 @@
     publish_rate: 1.0
     frame_id: camera_color_optical_frame
     camera_name: d457
-    loop: false
+    loop: true
     voxel_leaf_size: 0.05
     sor_mean_k: 20.0
     sor_std_mul: 0.5

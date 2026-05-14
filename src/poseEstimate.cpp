@@ -494,16 +494,9 @@ namespace axispose
             return;
         }
 
-        cv::Mat point_cloud_camera_matrix = depth_camera_matrix_;
-        cv::Mat aligned_depth = depth_cv;
-        if (have_intrinsics_color_)
-        {
-            aligned_depth = alignDepthToColor(depth_cv, depth_cv.cols, depth_cv.rows);
-            point_cloud_camera_matrix = color_camera_matrix_;
-        }
-
         axispose_msgs::msg::TrackedPoseArray tracked_pose_array_msg;
         tracked_pose_array_msg.header = depth_msg->header;
+        tracked_pose_array_msg.header.frame_id = have_intrinsics_color_ ? color_frame_id_ : frame_id_;
         tracked_pose_array_msg.poses.reserve(tracked_objects_msg->objects.size());
 
         for (const auto &tracked_object : tracked_objects_msg->objects)
@@ -524,13 +517,21 @@ namespace axispose
                 continue;
             }
 
-            if (mask_cv.size() != aligned_depth.size())
+            cv::Mat object_depth = depth_cv;
+            cv::Mat point_cloud_camera_matrix = depth_camera_matrix_;
+            if (have_intrinsics_color_)
             {
-                cv::resize(mask_cv, mask_cv, aligned_depth.size(), 0, 0, cv::INTER_NEAREST);
+                object_depth = alignDepthToColor(depth_cv, mask_cv.cols, mask_cv.rows);
+                point_cloud_camera_matrix = color_camera_matrix_;
             }
 
-            cv::Mat depth_filtered = cv::Mat::zeros(aligned_depth.size(), aligned_depth.type());
-            aligned_depth.copyTo(depth_filtered, mask_cv);
+            if (mask_cv.size() != object_depth.size())
+            {
+                cv::resize(mask_cv, mask_cv, object_depth.size(), 0, 0, cv::INTER_NEAREST);
+            }
+
+            cv::Mat depth_filtered = cv::Mat::zeros(object_depth.size(), object_depth.type());
+            object_depth.copyTo(depth_filtered, mask_cv);
 
             auto organized = pc_processor_->depthMaskToPointCloud(depth_filtered, point_cloud_camera_matrix);
             if (!organized || organized->empty())

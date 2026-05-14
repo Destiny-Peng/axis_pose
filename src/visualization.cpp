@@ -362,16 +362,22 @@ namespace axispose
 
         auto trackColor = [](uint32_t track_id) -> cv::Scalar
         {
-            static const std::array<cv::Scalar, 8> palette = {
-                cv::Scalar(0, 255, 0),
-                cv::Scalar(0, 165, 255),
-                cv::Scalar(255, 0, 0),
-                cv::Scalar(255, 0, 255),
-                cv::Scalar(0, 255, 255),
-                cv::Scalar(255, 255, 0),
-                cv::Scalar(128, 255, 0),
-                cv::Scalar(255, 128, 0)};
-            return palette[track_id % palette.size()];
+            static std::unordered_map<uint32_t, cv::Scalar> color_cache;
+            const auto it = color_cache.find(track_id);
+            if (it != color_cache.end())
+            {
+                return it->second;
+            }
+
+            const int hue = static_cast<int>((track_id * 137U) % 180U);
+            cv::Mat hsv(1, 1, CV_8UC3);
+            hsv.at<cv::Vec3b>(0, 0) = cv::Vec3b(static_cast<uint8_t>(hue), 220, 255);
+            cv::Mat bgr;
+            cv::cvtColor(hsv, bgr, cv::COLOR_HSV2BGR);
+            const cv::Vec3b value = bgr.at<cv::Vec3b>(0, 0);
+            const cv::Scalar color(value[0], value[1], value[2]);
+            color_cache.emplace(track_id, color);
+            return color;
         };
 
         for (const auto &object_item : object_array_msg->objects)
@@ -396,11 +402,7 @@ namespace axispose
             const cv::Scalar color = trackColor(object_item.track_id);
             cv::Mat color_mask = cv::Mat::zeros(rgb_cv.size(), CV_8UC3);
             color_mask.setTo(color, mask_cv);
-            cv::addWeighted(color_mask, 0.35, vis, 0.65, 0.0, vis);
-
-            cv::rectangle(vis,
-                          cv::Rect(static_cast<int>(object_item.bbox.x_offset), static_cast<int>(object_item.bbox.y_offset), static_cast<int>(object_item.bbox.width), static_cast<int>(object_item.bbox.height)),
-                          color, 2);
+            cv::addWeighted(color_mask, 0.35, vis, 1, 0.0, vis);
 
             auto it = lookup.find(object_item.track_id);
             if (it == lookup.end() || it->second.pose == nullptr)
@@ -435,38 +437,30 @@ namespace axispose
 
             if (okc)
             {
-                cv::Point2f dir_pt;
-                bool have_dir = false;
-                if (oke)
-                {
-                    dir_pt = pe;
-                    have_dir = true;
-                }
-                else
-                {
-                    geometry_msgs::msg::Point axis_far;
-                    axis_far.x = center.x + axis_dir_e.x() * axis_length_ * 100.0;
-                    axis_far.y = center.y + axis_dir_e.y() * axis_length_ * 100.0;
-                    axis_far.z = center.z + axis_dir_e.z() * axis_length_ * 100.0;
-                    cv::Point2f pf;
-                    if (projectPoint(axis_far, camera_matrix, pf))
-                    {
-                        dir_pt = pf;
-                        have_dir = true;
-                    }
-                }
+                cv::Point2f dir_pt = oke ? pe : cv::Point2f(pc.x + 1000.0f * static_cast<float>(axis_dir_e.x()), pc.y + 1000.0f * static_cast<float>(axis_dir_e.y()));
+                cv::Point line_p1(static_cast<int>(std::lround(pc.x - (dir_pt.x - pc.x) * 1000.0f)),
+                                  static_cast<int>(std::lround(pc.y - (dir_pt.y - pc.y) * 1000.0f)));
+                cv::Point line_p2(static_cast<int>(std::lround(pc.x + (dir_pt.x - pc.x) * 1000.0f)),
+                                  static_cast<int>(std::lround(pc.y + (dir_pt.y - pc.y) * 1000.0f)));
 
-                if (have_dir)
+                cv::Rect bbox_rect(static_cast<int>(object_item.bbox.x_offset),
+                                   static_cast<int>(object_item.bbox.y_offset),
+                                   static_cast<int>(object_item.bbox.width),
+                                   static_cast<int>(object_item.bbox.height));
+                if (bbox_rect.width > 0 && bbox_rect.height > 0)
                 {
-                    cv::Point2f d = dir_pt - pc;
-                    if (std::abs(d.x) < 1e-6 && std::abs(d.y) < 1e-6)
+                    if (cv::clipLine(bbox_rect, line_p1, line_p2))
                     {
-                        cv::line(vis, cv::Point2f(pc.x - 50.0f, pc.y), cv::Point2f(pc.x + 50.0f, pc.y), color, 2);
+                        cv::line(vis, line_p1, line_p2, color, 2);
                     }
-                    else
+                    else if (oke)
                     {
-                        cv::line(vis, pc, pc + d, color, 2);
+                        cv::line(vis, pc, pe, color, 2);
                     }
+                }
+                else if (oke)
+                {
+                    cv::line(vis, pc, pe, color, 2);
                 }
             }
 
