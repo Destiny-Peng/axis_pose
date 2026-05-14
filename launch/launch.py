@@ -17,11 +17,11 @@ from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('axispose')
-    pkg_directory = os.path.join(pkg_share, '..', '..', '..', '..')
+    pkg_directory = os.path.join(pkg_share, '..', '..', '..', '..','axispose')
 
     # 默认图片目录在包内 image1/rgb 和 image1/depth（真实数据）
-    default_rgb = os.path.join(pkg_directory, 'image_tag_accurate', 'rgb')
-    default_depth = os.path.join(pkg_directory, 'image_tag_accurate', 'depth')
+    default_rgb = os.path.join(pkg_directory, 'image_test', 'rgb')
+    default_depth = os.path.join(pkg_directory, 'image_test', 'depth')
     default_engine = os.path.join(
         pkg_directory, 'engine', 'conf50.engine')
     default_statistic = os.path.join(

@@ -6,8 +6,12 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/region_of_interest.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <opencv2/opencv.hpp>
+
+#include <axispose_msgs/msg/tracked_object.hpp>
+#include <axispose_msgs/msg/tracked_object_array.hpp>
 
 #include "trtyolo.hpp"
 namespace axispose
@@ -34,6 +38,10 @@ namespace axispose
         static bool isSimilarCandidate(const TrackCandidate &lhs, const TrackCandidate &rhs, const cv::Size &frame_size, double center_dist_threshold_ratio);
         TrackCandidate selectInitialCandidate(const std::vector<TrackCandidate> &candidates, const cv::Size &frame_size) const;
         TrackCandidate selectTrackCandidate(const std::vector<TrackCandidate> &candidates, const cv::Size &frame_size, double *out_iou, double *out_center_dist_norm) const;
+        axispose_msgs::msg::TrackedObject buildTrackedObjectMessage(const TrackCandidate &candidate,
+                                                                    const std_msgs::msg::Header &header,
+                                                                    uint32_t track_id,
+                                                                    uint8_t status) const;
         std::string buildDebugString(const std::string &state,
                                      const std::vector<TrackCandidate> &candidates,
                                      const TrackCandidate *selected_candidate,
@@ -46,6 +54,7 @@ namespace axispose
 
         rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_;
         rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_;
+        rclcpp::Publisher<axispose_msgs::msg::TrackedObjectArray>::SharedPtr tracked_objects_pub_;
         rclcpp::Publisher<std_msgs::msg::String>::SharedPtr debug_pub_;
 
         std::unique_ptr<trtyolo::SegmentModel> model_;

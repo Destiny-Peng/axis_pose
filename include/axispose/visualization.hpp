@@ -5,6 +5,8 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <axispose_msgs/msg/tracked_object_array.hpp>
+#include <axispose_msgs/msg/tracked_pose_array.hpp>
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
 #include <message_filters/sync_policies/approximate_time.h>
@@ -20,13 +22,14 @@ namespace axispose
 
     private:
         using Image = sensor_msgs::msg::Image;
-        using Pose = geometry_msgs::msg::PoseStamped;
         using CameraInfo = sensor_msgs::msg::CameraInfo;
+        using TrackedObjectArray = axispose_msgs::msg::TrackedObjectArray;
+        using TrackedPoseArray = axispose_msgs::msg::TrackedPoseArray;
 
         // message_filters subscribers (wrapped in shared_ptr for lifetime control)
         message_filters::Subscriber<Image> rgb_sub_;
-        message_filters::Subscriber<Image> mask_sub_;
-        message_filters::Subscriber<Pose> pose_sub_;
+        message_filters::Subscriber<TrackedPoseArray> pose_array_sub_;
+        message_filters::Subscriber<TrackedObjectArray> object_array_sub_;
         // camera_info is static/latched; keep regular rclcpp subscriptions for
         // both color and depth caminfo and cache them.
         rclcpp::Subscription<CameraInfo>::SharedPtr caminfo_color_sub_;
@@ -34,8 +37,8 @@ namespace axispose
         CameraInfo::SharedPtr cached_caminfo_color_;
         CameraInfo::SharedPtr cached_caminfo_depth_;
 
-        // approximate time sync policy (RGB, Pose, Mask)
-        using ApproxSyncPolicy = message_filters::sync_policies::ApproximateTime<Image, Pose, Image>;
+        // approximate time sync policy (RGB, TrackedPoseArray, TrackedObjectArray)
+        using ApproxSyncPolicy = message_filters::sync_policies::ApproximateTime<Image, TrackedPoseArray, TrackedObjectArray>;
         std::shared_ptr<message_filters::Synchronizer<ApproxSyncPolicy>> sync_;
 
         // publisher for visualization image
@@ -55,11 +58,13 @@ namespace axispose
 
         // callback invoked with synchronized messages
         void syncCallback(const Image::ConstSharedPtr rgb_msg,
-                          const Pose::ConstSharedPtr pose_msg,
-                          const Image::ConstSharedPtr mask_msg);
+                          const TrackedPoseArray::ConstSharedPtr pose_array_msg,
+                          const TrackedObjectArray::ConstSharedPtr object_array_msg);
 
         // parameters
         double axis_length_ = 0.25; // meters for visualized axis half-length
+        std::string pose_array_topic_{"/shaft/tracked_poses"};
+        std::string object_array_topic_{"/yolo/tracked_objects"};
     };
 
 } // namespace axispose

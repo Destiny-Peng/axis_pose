@@ -22,6 +22,9 @@
     color_camera_info_topic: /camera/color/camera_info
     depth_camera_info_topic: /camera/depth/camera_info
     mask_topic: /yolo/mask
+    tracked_object_topic: /yolo/tracked_objects
+    tracked_objects_topic: /yolo/tracked_objects
+    tracked_pose_topic: /shaft/tracked_poses
     tracking_enabled: true
     lost_grace_frames: 12
     reacquire_confirm_frames: 2

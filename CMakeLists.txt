@@ -25,6 +25,7 @@ find_package(Eigen3 REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(axispose_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(camera_info_manager REQUIRED)
@@ -67,6 +68,7 @@ ament_target_dependencies(CameraDriver
   image_transport
   camera_info_manager
   ament_index_cpp
+  axispose_msgs
 )
 rclcpp_components_register_nodes(CameraDriver PLUGIN "axispose::CameraDriver" EXECUTABLE camera_driver_node)
 
@@ -92,6 +94,7 @@ ament_target_dependencies(SegmentNode
   cv_bridge
   image_transport
   std_msgs
+  axispose_msgs
 )
 rclcpp_components_register_nodes(SegmentNode PLUGIN "axispose::SegmentNode" EXECUTABLE SegmentNode_node)
 
@@ -122,6 +125,7 @@ ament_target_dependencies(PoseEstimate
   pcl_conversions
   image_transport
   std_msgs
+  axispose_msgs
 )
 rclcpp_components_register_nodes(PoseEstimate PLUGIN "axispose::PoseEstimatePCA" EXECUTABLE PoseEstimatePCA_node)
 rclcpp_components_register_nodes(PoseEstimate PLUGIN "axispose::PoseEstimateRANSAC" EXECUTABLE PoseEstimateRANSAC_node)
@@ -150,6 +154,7 @@ ament_target_dependencies(Visualization
   pcl_conversions
   image_transport
   std_msgs
+  axispose_msgs
 )
 rclcpp_components_register_nodes(Visualization PLUGIN "axispose::Visualization" EXECUTABLE Visualization_node)
 

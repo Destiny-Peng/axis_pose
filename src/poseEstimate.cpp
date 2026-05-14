@@ -9,6 +9,8 @@
 #include <tuple>
 #include <algorithm>
 
+#include <axispose_msgs/msg/tracked_pose_array.hpp>
+
 namespace axispose
 {
 
@@ -17,6 +19,8 @@ namespace axispose
         // parameters
         this->declare_parameter("depth_image_topic", std::string("/camera/depth/image_raw"));
         this->declare_parameter("mask_topic", std::string("/yolo/mask"));
+        this->declare_parameter("tracked_objects_topic", std::string("/yolo/tracked_objects"));
+        this->declare_parameter("tracked_pose_topic", std::string("/shaft/tracked_poses"));
         this->declare_parameter("color_camera_info_topic", std::string("/camera/color/camera_info"));
         this->declare_parameter("depth_camera_info_topic", std::string("/camera/depth/camera_info"));
         this->declare_parameter("voxel_leaf_size", voxel_leaf_size_);
@@ -45,6 +49,8 @@ namespace axispose
 
         std::string depth_image_topic = this->get_parameter("depth_image_topic").as_string();
         std::string mask_topic = this->get_parameter("mask_topic").as_string();
+        std::string tracked_objects_topic = this->get_parameter("tracked_objects_topic").as_string();
+        std::string tracked_pose_topic = this->get_parameter("tracked_pose_topic").as_string();
         std::string color_camera_info_topic = this->get_parameter("color_camera_info_topic").as_string();
         std::string depth_camera_info_topic = this->get_parameter("depth_camera_info_topic").as_string();
         voxel_leaf_size_ = this->get_parameter("voxel_leaf_size").as_double();
@@ -69,7 +75,8 @@ namespace axispose
         kalman_min_dt_ = this->get_parameter("kalman_min_dt").as_double();
         kalman_max_dt_ = this->get_parameter("kalman_max_dt").as_double();
 
-        RCLCPP_INFO(this->get_logger(), "PoseEstimate node starting. Depth: %s Mask: %s ", depth_image_topic.c_str(), mask_topic.c_str());
+        RCLCPP_INFO(this->get_logger(), "PoseEstimate node starting. Depth: %s Mask: %s TrackedObjects: %s",
+                    depth_image_topic.c_str(), mask_topic.c_str(), tracked_objects_topic.c_str());
         if (kalman_enabled_)
         {
             RCLCPP_INFO(this->get_logger(), "Pose Kalman enabled: q_pos=%.6f r_pos=%.6f q_axis=%.6f r_axis=%.6f dt=[%.4f, %.4f]",
@@ -86,10 +93,10 @@ namespace axispose
         rclcpp::QoS qos(rclcpp::KeepLast(5));
         // message_filters subscribers
         depth_sub_.subscribe(this, depth_image_topic, qos.get_rmw_qos_profile());
-        mask_sub_.subscribe(this, mask_topic, qos.get_rmw_qos_profile());
+        tracked_objects_sub_.subscribe(this, tracked_objects_topic, qos.get_rmw_qos_profile());
 
-        sync_ = std::make_shared<message_filters::Synchronizer<ApproxSyncPolicy>>(ApproxSyncPolicy(10), depth_sub_, mask_sub_);
-        sync_->registerCallback(&PoseEstimateBase::syncCallback, this);
+        sync_ = std::make_shared<message_filters::Synchronizer<ApproxSyncPolicy>>(ApproxSyncPolicy(10), depth_sub_, tracked_objects_sub_);
+        sync_->registerCallback(&PoseEstimateBase::syncTrackedObjectsCallback, this);
 
         // subscribe to color and depth camera_info topics separately
         camera_info_color_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
@@ -100,6 +107,7 @@ namespace axispose
             std::bind(&PoseEstimateBase::cameraInfoDepthCallback, this, std::placeholders::_1));
 
         pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/shaft/pose", 10);
+        tracked_pose_pub_ = this->create_publisher<axispose_msgs::msg::TrackedPoseArray>(tracked_pose_topic, 10);
         debug_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/shaft/debug_cloud", 1);
 
         // initialize debug manager (controls runtime debug flags via parameter `debug_flags`)
@@ -160,6 +168,164 @@ namespace axispose
                         color_camera_matrix_.at<double>(1, 2),
                         msg->header.frame_id.c_str());
         }
+    }
+
+    axispose_msgs::msg::TrackedPose PoseEstimateBase::buildTrackedPoseMessage(uint32_t track_id,
+                                                                              const axispose_msgs::msg::TrackedObject &object,
+                                                                              const geometry_msgs::msg::PoseStamped &pose_msg,
+                                                                              size_t valid_points) const
+    {
+        axispose_msgs::msg::TrackedPose tracked_pose;
+        tracked_pose.header = pose_msg.header;
+        tracked_pose.track_id = track_id;
+        tracked_pose.class_id = object.class_id;
+        tracked_pose.score = object.score;
+        tracked_pose.status = object.status;
+        tracked_pose.valid_points = static_cast<uint32_t>(valid_points);
+        tracked_pose.pose.pose.position = pose_msg.pose.position;
+        tracked_pose.pose.pose.orientation = pose_msg.pose.orientation;
+        tracked_pose.pose.covariance.fill(0.0);
+        return tracked_pose;
+    }
+
+    void PoseEstimateBase::resetTrackedKalmanState(uint32_t track_id, const Eigen::Vector3d &position, const Eigen::Vector3d &axis, double stamp_s)
+    {
+        std::lock_guard<std::mutex> lock(tracked_kalman_mutex_);
+        TrackKalmanState &state = tracked_kalman_states_[track_id];
+        state.initialized = true;
+        state.last_stamp_s = stamp_s;
+        state.axis_history_valid = true;
+        state.axis_history = axis.normalized();
+        state.pos_x = position;
+        state.pos_v.setZero();
+        state.axis_x = axis.normalized();
+        state.axis_v.setZero();
+        for (int i = 0; i < 3; ++i)
+        {
+            state.pos_P[i] = Eigen::Matrix2d::Identity() * kalman_initial_covariance_;
+            state.axis_P[i] = Eigen::Matrix2d::Identity() * kalman_initial_covariance_;
+        }
+    }
+
+    geometry_msgs::msg::PoseStamped PoseEstimateBase::applyKalmanFilterToTrackedPose(uint32_t track_id, const geometry_msgs::msg::PoseStamped &raw_pose, const rclcpp::Time &stamp)
+    {
+        if (!kalman_enabled_)
+        {
+            return raw_pose;
+        }
+
+        const auto &rp = raw_pose.pose;
+        const Eigen::Vector3d raw_pos(rp.position.x, rp.position.y, rp.position.z);
+        if (!std::isfinite(raw_pos.x()) || !std::isfinite(raw_pos.y()) || !std::isfinite(raw_pos.z()))
+        {
+            return raw_pose;
+        }
+
+        Eigen::Quaterniond q_raw(rp.orientation.w, rp.orientation.x, rp.orientation.y, rp.orientation.z);
+        if (q_raw.norm() <= 1e-9)
+        {
+            return raw_pose;
+        }
+        q_raw.normalize();
+        Eigen::Vector3d raw_axis = q_raw.toRotationMatrix().col(0).normalized();
+        if (!std::isfinite(raw_axis.x()) || !std::isfinite(raw_axis.y()) || !std::isfinite(raw_axis.z()))
+        {
+            return raw_pose;
+        }
+
+        const double stamp_s = stamp.seconds();
+        std::lock_guard<std::mutex> lock(tracked_kalman_mutex_);
+        TrackKalmanState &state = tracked_kalman_states_[track_id];
+        if (!state.initialized || stamp_s <= 0.0)
+        {
+            state.initialized = true;
+            state.last_stamp_s = stamp_s;
+            state.axis_history_valid = true;
+            state.axis_history = raw_axis;
+            state.pos_x = raw_pos;
+            state.pos_v.setZero();
+            state.axis_x = raw_axis;
+            state.axis_v.setZero();
+            for (int i = 0; i < 3; ++i)
+            {
+                state.pos_P[i] = Eigen::Matrix2d::Identity() * kalman_initial_covariance_;
+                state.axis_P[i] = Eigen::Matrix2d::Identity() * kalman_initial_covariance_;
+            }
+            geometry_msgs::msg::PoseStamped out = raw_pose;
+            out.pose.orientation.x = q_raw.x();
+            out.pose.orientation.y = q_raw.y();
+            out.pose.orientation.z = q_raw.z();
+            out.pose.orientation.w = q_raw.w();
+            return out;
+        }
+
+        double dt = stamp_s - state.last_stamp_s;
+        if (!std::isfinite(dt) || dt <= 0.0)
+        {
+            dt = kalman_min_dt_;
+        }
+        if (dt < kalman_min_dt_)
+            dt = kalman_min_dt_;
+        if (dt > kalman_max_dt_)
+            dt = kalman_max_dt_;
+
+        Eigen::Vector3d axis_meas = raw_axis;
+        if (state.axis_history_valid && axis_meas.dot(state.axis_history) < 0.0)
+        {
+            axis_meas = -axis_meas;
+        }
+
+        for (int i = 0; i < 3; ++i)
+        {
+            kalmanPredictUpdate1D(raw_pos[i], dt, kalman_position_process_noise_, kalman_position_measurement_noise_,
+                                  state.pos_x[i], state.pos_v[i], state.pos_P[i]);
+            kalmanPredictUpdate1D(axis_meas[i], dt, kalman_axis_process_noise_, kalman_axis_measurement_noise_,
+                                  state.axis_x[i], state.axis_v[i], state.axis_P[i]);
+        }
+        state.last_stamp_s = stamp_s;
+
+        Eigen::Vector3d filtered_axis = state.axis_x;
+        const double axis_norm = filtered_axis.norm();
+        if (axis_norm > 1e-9)
+        {
+            filtered_axis /= axis_norm;
+        }
+        else
+        {
+            filtered_axis = axis_meas;
+        }
+
+        if (state.axis_history_valid && filtered_axis.dot(state.axis_history) < 0.0)
+        {
+            filtered_axis = -filtered_axis;
+        }
+        state.axis_history = (0.8 * state.axis_history + 0.2 * filtered_axis).normalized();
+        state.axis_history_valid = true;
+
+        Eigen::Vector3d up = Eigen::Vector3d::UnitY();
+        if (std::abs(filtered_axis.dot(up)) > 0.99)
+        {
+            up = Eigen::Vector3d::UnitZ();
+        }
+        Eigen::Vector3d axis_y = (up - up.dot(filtered_axis) * filtered_axis).normalized();
+        Eigen::Vector3d axis_z = filtered_axis.cross(axis_y).normalized();
+
+        Eigen::Matrix3d R;
+        R.col(0) = filtered_axis;
+        R.col(1) = axis_y;
+        R.col(2) = axis_z;
+        Eigen::Quaterniond q_filtered(R);
+        q_filtered.normalize();
+
+        geometry_msgs::msg::PoseStamped out = raw_pose;
+        out.pose.position.x = state.pos_x.x();
+        out.pose.position.y = state.pos_x.y();
+        out.pose.position.z = state.pos_x.z();
+        out.pose.orientation.x = q_filtered.x();
+        out.pose.orientation.y = q_filtered.y();
+        out.pose.orientation.z = q_filtered.z();
+        out.pose.orientation.w = q_filtered.w();
+        return out;
     }
 
     void PoseEstimateBase::syncCallback(const Image::ConstSharedPtr depth_msg, const Image::ConstSharedPtr mask_msg)
@@ -301,6 +467,139 @@ namespace axispose
         if (!debug_ || debug_->enabled("debug_cloud"))
         {
             debug_cloud_pub_->publish(cloud_msg);
+        }
+    }
+
+    void PoseEstimateBase::syncTrackedObjectsCallback(const Image::ConstSharedPtr depth_msg, const TrackedObjectArray::ConstSharedPtr tracked_objects_msg)
+    {
+        if (!tracked_objects_msg)
+        {
+            return;
+        }
+
+        if (!have_intrinsics_depth_)
+        {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "No depth camera intrinsics yet, skipping tracked frame");
+            return;
+        }
+
+        cv::Mat depth_cv;
+        try
+        {
+            depth_cv = cv::Mat(depth_msg->height, depth_msg->width, CV_16U, const_cast<unsigned char *>(depth_msg->data.data())).clone();
+        }
+        catch (const std::exception &e)
+        {
+            RCLCPP_ERROR(this->get_logger(), "cv_bridge depth conversion failed: %s", e.what());
+            return;
+        }
+
+        cv::Mat point_cloud_camera_matrix = depth_camera_matrix_;
+        cv::Mat aligned_depth = depth_cv;
+        if (have_intrinsics_color_)
+        {
+            aligned_depth = alignDepthToColor(depth_cv, depth_cv.cols, depth_cv.rows);
+            point_cloud_camera_matrix = color_camera_matrix_;
+        }
+
+        axispose_msgs::msg::TrackedPoseArray tracked_pose_array_msg;
+        tracked_pose_array_msg.header = depth_msg->header;
+        tracked_pose_array_msg.poses.reserve(tracked_objects_msg->objects.size());
+
+        for (const auto &tracked_object : tracked_objects_msg->objects)
+        {
+            if (tracked_object.mask.data.empty())
+            {
+                continue;
+            }
+
+            cv::Mat mask_cv;
+            try
+            {
+                mask_cv = cv::Mat(tracked_object.mask.height, tracked_object.mask.width, CV_8U, const_cast<unsigned char *>(tracked_object.mask.data.data())).clone();
+            }
+            catch (const std::exception &e)
+            {
+                RCLCPP_WARN(this->get_logger(), "Tracked mask conversion failed for track %u: %s", tracked_object.track_id, e.what());
+                continue;
+            }
+
+            if (mask_cv.size() != aligned_depth.size())
+            {
+                cv::resize(mask_cv, mask_cv, aligned_depth.size(), 0, 0, cv::INTER_NEAREST);
+            }
+
+            cv::Mat depth_filtered = cv::Mat::zeros(aligned_depth.size(), aligned_depth.type());
+            aligned_depth.copyTo(depth_filtered, mask_cv);
+
+            auto organized = pc_processor_->depthMaskToPointCloud(depth_filtered, point_cloud_camera_matrix);
+            if (!organized || organized->empty())
+            {
+                continue;
+            }
+
+            pcl::PointCloud<pcl::PointXYZ>::Ptr valid_cloud(new pcl::PointCloud<pcl::PointXYZ>());
+            valid_cloud->header = organized->header;
+            for (const auto &pt : organized->points)
+            {
+                if (std::isfinite(pt.x) && std::isfinite(pt.y) && std::isfinite(pt.z))
+                {
+                    valid_cloud->points.push_back(pt);
+                }
+            }
+            valid_cloud->width = static_cast<uint32_t>(valid_cloud->points.size());
+            valid_cloud->height = 1;
+            if (valid_cloud->empty())
+            {
+                continue;
+            }
+
+            denoisePointCloud(valid_cloud);
+
+            geometry_msgs::msg::PoseStamped pose_msg;
+            if (benchmark_)
+            {
+                auto tup = benchmark_->run(benchmarkLabel(), [this, &valid_cloud, &mask_cv, &depth_msg]()
+                                           {
+                    auto p = this->computePoseByAlgorithm(valid_cloud, mask_cv, depth_msg->header.stamp);
+                    return std::make_tuple(p, static_cast<size_t>(valid_cloud->size())); }, [](const std::tuple<geometry_msgs::msg::PoseStamped, size_t> &t) -> std::vector<std::string>
+                                           {
+                    const auto &pose = std::get<0>(t).pose;
+                    size_t n = std::get<1>(t);
+                    std::vector<std::string> out;
+                    out.reserve(8);
+                    out.push_back(std::to_string(n));
+                    out.push_back(std::to_string(pose.position.x));
+                    out.push_back(std::to_string(pose.position.y));
+                    out.push_back(std::to_string(pose.position.z));
+                    out.push_back(std::to_string(pose.orientation.x));
+                    out.push_back(std::to_string(pose.orientation.y));
+                    out.push_back(std::to_string(pose.orientation.z));
+                    out.push_back(std::to_string(pose.orientation.w));
+                    return out; });
+                pose_msg = std::get<0>(tup);
+            }
+            else
+            {
+                pose_msg = computePoseByAlgorithm(valid_cloud, mask_cv, depth_msg->header.stamp);
+            }
+
+            pose_msg.header.stamp = depth_msg->header.stamp;
+            pose_msg.header.frame_id = have_intrinsics_color_ ? color_frame_id_ : frame_id_;
+            pose_msg = applyKalmanFilterToTrackedPose(tracked_object.track_id, pose_msg, depth_msg->header.stamp);
+
+            if (tracked_object.status == axispose_msgs::msg::TrackedObject::STATUS_CONFIRMED)
+            {
+                pose_pub_->publish(pose_msg);
+            }
+
+            tracked_pose_array_msg.poses.push_back(
+                buildTrackedPoseMessage(tracked_object.track_id, tracked_object, pose_msg, valid_cloud->size()));
+        }
+
+        if (tracked_pose_pub_)
+        {
+            tracked_pose_pub_->publish(tracked_pose_array_msg);
         }
     }
 

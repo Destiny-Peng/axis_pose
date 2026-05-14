@@ -16,6 +16,7 @@
 #include <limits>
 #include <cmath>
 #include <array>
+#include <unordered_map>
 
 namespace axispose
 {
@@ -125,6 +126,8 @@ namespace axispose
         this->declare_parameter("mask_topic", std::string("/yolo/mask"));
         this->declare_parameter("color_image_topic", std::string("/camera/rgb/image_raw"));
         this->declare_parameter("pose_topic", std::string("/shaft/pose"));
+        this->declare_parameter("tracked_pose_topic", std::string("/shaft/tracked_poses"));
+        this->declare_parameter("tracked_object_topic", std::string("/yolo/tracked_objects"));
         this->declare_parameter("camera_info_topic", std::string("/camera/color/camera_info"));
         this->declare_parameter("depth_camera_info_topic", std::string("/camera/depth/camera_info"));
         this->declare_parameter("axis_length", axis_length_);
@@ -138,6 +141,8 @@ namespace axispose
         std::string mask_topic = this->get_parameter("mask_topic").as_string();
         std::string color_image_topic = this->get_parameter("color_image_topic").as_string();
         std::string pose_topic = this->get_parameter("pose_topic").as_string();
+        pose_array_topic_ = this->get_parameter("tracked_pose_topic").as_string();
+        object_array_topic_ = this->get_parameter("tracked_object_topic").as_string();
         std::string caminfo_topic = this->get_parameter("camera_info_topic").as_string();
         std::string depth_caminfo_topic = this->get_parameter("depth_camera_info_topic").as_string();
         axis_length_ = this->get_parameter("axis_length").as_double();
@@ -218,7 +223,7 @@ namespace axispose
 
         // Use message_filters subscribers
         rgb_sub_.subscribe(this, color_image_topic, qos.get_rmw_qos_profile());
-        pose_sub_.subscribe(this, pose_topic, qos.get_rmw_qos_profile());
+        pose_array_sub_.subscribe(this, pose_array_topic_, qos.get_rmw_qos_profile());
 
         // camera_info is latched/transient_local and static — subscribe with
         // transient_local QoS and disable intra-process on these subscriptions
@@ -243,15 +248,15 @@ namespace axispose
             },
             caminfo_sub_options);
 
-        mask_sub_.subscribe(this, mask_topic, qos.get_rmw_qos_profile());
+        object_array_sub_.subscribe(this, object_array_topic_, qos.get_rmw_qos_profile());
 
-        // Synchronize RGB, Pose and Mask only; CameraInfo is read from cache.
-        sync_.reset(new message_filters::Synchronizer<ApproxSyncPolicy>(ApproxSyncPolicy(10), rgb_sub_, pose_sub_, mask_sub_));
+        // Synchronize RGB, tracked poses and tracked objects; CameraInfo is read from cache.
+        sync_.reset(new message_filters::Synchronizer<ApproxSyncPolicy>(ApproxSyncPolicy(10), rgb_sub_, pose_array_sub_, object_array_sub_));
         sync_->registerCallback(&Visualization::syncCallback, this);
 
         vis_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/shaft/vis_image", 1);
 
-        RCLCPP_INFO(this->get_logger(), "Visualization node started. Subscribed to %s %s %s %s", color_image_topic.c_str(), pose_topic.c_str(), caminfo_topic.c_str(), mask_topic.c_str());
+        RCLCPP_INFO(this->get_logger(), "Visualization node started. Subscribed to %s %s %s %s", color_image_topic.c_str(), pose_array_topic_.c_str(), caminfo_topic.c_str(), object_array_topic_.c_str());
     }
 
     static cv::Mat cameraMatrixFromInfo(const sensor_msgs::msg::CameraInfo &cam)
@@ -297,15 +302,21 @@ namespace axispose
     }
 
     void Visualization::syncCallback(const Image::ConstSharedPtr rgb_msg,
-                                     const Pose::ConstSharedPtr pose_msg,
-                                     const Image::ConstSharedPtr mask_msg)
+                                     const TrackedPoseArray::ConstSharedPtr pose_array_msg,
+                                     const TrackedObjectArray::ConstSharedPtr object_array_msg)
     {
         RCLCPP_DEBUG(this->get_logger(), "Visualization::syncCallback invoked");
-        // choose camera_info matching the pose frame if possible
+        if (!pose_array_msg || !object_array_msg)
+        {
+            return;
+        }
+
+        // choose camera_info matching the tracked pose frame if possible
         CameraInfo::SharedPtr caminfo_to_use;
-        if (cached_caminfo_color_ && pose_msg->header.frame_id == cached_caminfo_color_->header.frame_id)
+        const std::string pose_frame = pose_array_msg->header.frame_id;
+        if (cached_caminfo_color_ && pose_frame == cached_caminfo_color_->header.frame_id)
             caminfo_to_use = cached_caminfo_color_;
-        else if (cached_caminfo_depth_ && pose_msg->header.frame_id == cached_caminfo_depth_->header.frame_id)
+        else if (cached_caminfo_depth_ && pose_frame == cached_caminfo_depth_->header.frame_id)
             caminfo_to_use = cached_caminfo_depth_;
         else if (cached_caminfo_color_)
             caminfo_to_use = cached_caminfo_color_;
@@ -331,206 +342,156 @@ namespace axispose
             return;
         }
 
-        // convert mask to cv::Mat (assume mono8)
-        cv::Mat mask_cv;
-        try
-        {
-            auto mask_ptr = cv_bridge::toCvCopy(mask_msg, "mono8");
-            mask_cv = mask_ptr->image.clone();
-        }
-        catch (const cv_bridge::Exception &e)
-        {
-            RCLCPP_ERROR(this->get_logger(), "cv_bridge mask conversion failed: %s", e.what());
-            return;
-        }
-
-        // ensure same size
-        if (rgb_cv.size() != mask_cv.size())
-        {
-            cv::resize(mask_cv, mask_cv, rgb_cv.size(), 0, 0, cv::INTER_NEAREST);
-        }
-
-        // get pose in camera frame (pose message frame must be camera frame)
-        // pose_msg.pose.position is centroid, orientation encodes axis rotation. We'll draw center and one axis direction (x axis of pose)
-        geometry_msgs::msg::Point center = pose_msg->pose.position;
-
-        // compute axis endpoint in camera frame: transform local axis vector
-        // convert geometry_msgs quaternion to Eigen quaternion (w, x, y, z)
-        Eigen::Quaterniond q_e(pose_msg->pose.orientation.w,
-                               pose_msg->pose.orientation.x,
-                               pose_msg->pose.orientation.y,
-                               pose_msg->pose.orientation.z);
-        // rotation matrix and axis direction (local x axis)
-        Eigen::Matrix3d R = q_e.toRotationMatrix();
-        Eigen::Vector3d axis_dir_e = R * Eigen::Vector3d(1.0, 0.0, 0.0);
-        geometry_msgs::msg::Point axis_end;
-        axis_end.x = center.x + axis_dir_e.x() * axis_length_;
-        axis_end.y = center.y + axis_dir_e.y() * axis_length_;
-        axis_end.z = center.z + axis_dir_e.z() * axis_length_;
-
-        // project center and axis_end
-        cv::Point2f pc, pe;
-        bool okc = projectPoint(center, camera_matrix, pc);
-        bool oke = projectPoint(axis_end, camera_matrix, pe);
-
-        // draw mask overlay (colored)
         cv::Mat vis = rgb_cv.clone();
-        cv::Mat color_mask;
-        cv::cvtColor(mask_cv, color_mask, cv::COLOR_GRAY2BGR);
-        // colorize mask green
-        color_mask.setTo(cv::Scalar(0, 255, 0), mask_cv);
-        double alpha = 0.4;
-        cv::addWeighted(color_mask, alpha, vis, 1.0 - alpha, 0.0, vis);
-
-        // draw center and axis line if projection succeeded
-        cv::Point2f eval_dir_pt;
-        bool eval_have_dir = false;
-
-        if (okc)
+        struct PoseLookup
         {
-            cv::circle(vis, pc, 6, cv::Scalar(0, 0, 255), -1);
+            const axispose_msgs::msg::TrackedPose *pose{nullptr};
+            const axispose_msgs::msg::TrackedObject *object{nullptr};
+        };
+
+        std::unordered_map<uint32_t, PoseLookup> lookup;
+        lookup.reserve(std::min(pose_array_msg->poses.size(), object_array_msg->objects.size()));
+        for (const auto &pose_item : pose_array_msg->poses)
+        {
+            lookup[pose_item.track_id].pose = &pose_item;
+        }
+        for (const auto &object_item : object_array_msg->objects)
+        {
+            lookup[object_item.track_id].object = &object_item;
         }
 
-        if (okc)
+        auto trackColor = [](uint32_t track_id) -> cv::Scalar
         {
-            // determine a projected axis direction point; if axis_end projection failed,
-            // try projecting a far point along the axis to get a direction in image plane.
-            cv::Point2f dir_pt;
-            bool have_dir = false;
-            if (oke)
+            static const std::array<cv::Scalar, 8> palette = {
+                cv::Scalar(0, 255, 0),
+                cv::Scalar(0, 165, 255),
+                cv::Scalar(255, 0, 0),
+                cv::Scalar(255, 0, 255),
+                cv::Scalar(0, 255, 255),
+                cv::Scalar(255, 255, 0),
+                cv::Scalar(128, 255, 0),
+                cv::Scalar(255, 128, 0)};
+            return palette[track_id % palette.size()];
+        };
+
+        for (const auto &object_item : object_array_msg->objects)
+        {
+            cv::Mat mask_cv;
+            try
             {
-                dir_pt = pe;
-                have_dir = true;
+                auto mask_ptr = cv_bridge::toCvCopy(object_item.mask, "mono8");
+                mask_cv = mask_ptr->image.clone();
             }
-            else
+            catch (const cv_bridge::Exception &e)
             {
-                // try a far point along axis to estimate image direction
-                geometry_msgs::msg::Point axis_far;
-                axis_far.x = center.x + axis_dir_e.x() * axis_length_ * 100.0;
-                axis_far.y = center.y + axis_dir_e.y() * axis_length_ * 100.0;
-                axis_far.z = center.z + axis_dir_e.z() * axis_length_ * 100.0;
-                cv::Point2f pf;
-                if (projectPoint(axis_far, camera_matrix, pf))
-                {
-                    dir_pt = pf;
-                    have_dir = true;
-                }
+                RCLCPP_WARN(this->get_logger(), "Visualization: mask conversion failed for track %u: %s", object_item.track_id, e.what());
+                continue;
             }
 
-            if (have_dir)
+            if (mask_cv.size() != rgb_cv.size())
             {
-                eval_dir_pt = dir_pt;
-                eval_have_dir = true;
-                // build a line through pc in direction (dir_pt - pc) and clip to image bounds
-                cv::Point2f d = dir_pt - pc;
-                const int W = vis.cols;
-                const int H = vis.rows;
-                std::vector<cv::Point2f> ints;
-                // if direction is nearly zero, draw small short line
-                if (std::abs(d.x) < 1e-6 && std::abs(d.y) < 1e-6)
+                cv::resize(mask_cv, mask_cv, rgb_cv.size(), 0, 0, cv::INTER_NEAREST);
+            }
+
+            const cv::Scalar color = trackColor(object_item.track_id);
+            cv::Mat color_mask = cv::Mat::zeros(rgb_cv.size(), CV_8UC3);
+            color_mask.setTo(color, mask_cv);
+            cv::addWeighted(color_mask, 0.35, vis, 0.65, 0.0, vis);
+
+            cv::rectangle(vis,
+                          cv::Rect(static_cast<int>(object_item.bbox.x_offset), static_cast<int>(object_item.bbox.y_offset), static_cast<int>(object_item.bbox.width), static_cast<int>(object_item.bbox.height)),
+                          color, 2);
+
+            auto it = lookup.find(object_item.track_id);
+            if (it == lookup.end() || it->second.pose == nullptr)
+            {
+                continue;
+            }
+
+            const auto &pose_item = *it->second.pose;
+            const auto &pose_msg = pose_item.pose.pose;
+            geometry_msgs::msg::Point center;
+            center.x = pose_msg.position.x;
+            center.y = pose_msg.position.y;
+            center.z = pose_msg.position.z;
+
+            Eigen::Quaterniond q_e(pose_msg.orientation.w,
+                                   pose_msg.orientation.x,
+                                   pose_msg.orientation.y,
+                                   pose_msg.orientation.z);
+            Eigen::Vector3d axis_dir_e = q_e.toRotationMatrix() * Eigen::Vector3d(1.0, 0.0, 0.0);
+            geometry_msgs::msg::Point axis_end;
+            axis_end.x = center.x + axis_dir_e.x() * axis_length_;
+            axis_end.y = center.y + axis_dir_e.y() * axis_length_;
+            axis_end.z = center.z + axis_dir_e.z() * axis_length_;
+
+            cv::Point2f pc, pe;
+            const bool okc = projectPoint(center, camera_matrix, pc);
+            const bool oke = projectPoint(axis_end, camera_matrix, pe);
+            if (okc)
+            {
+                cv::circle(vis, pc, 5, color, -1);
+            }
+
+            if (okc)
+            {
+                cv::Point2f dir_pt;
+                bool have_dir = false;
+                if (oke)
                 {
-                    cv::Point2f p1(pc.x - 50.0f, pc.y);
-                    cv::Point2f p2(pc.x + 50.0f, pc.y);
-                    cv::line(vis, p1, p2, cv::Scalar(255, 0, 0), 2);
+                    dir_pt = pe;
+                    have_dir = true;
                 }
                 else
                 {
-                    // intersections with x=0 and x=W-1
-                    if (std::abs(d.x) > 1e-9)
+                    geometry_msgs::msg::Point axis_far;
+                    axis_far.x = center.x + axis_dir_e.x() * axis_length_ * 100.0;
+                    axis_far.y = center.y + axis_dir_e.y() * axis_length_ * 100.0;
+                    axis_far.z = center.z + axis_dir_e.z() * axis_length_ * 100.0;
+                    cv::Point2f pf;
+                    if (projectPoint(axis_far, camera_matrix, pf))
                     {
-                        float t0 = (0.0f - pc.x) / d.x;
-                        float y0 = pc.y + t0 * d.y;
-                        if (y0 >= 0.0f && y0 <= static_cast<float>(H - 1))
-                            ints.emplace_back(0.0f, y0);
-                        float t1 = (static_cast<float>(W - 1) - pc.x) / d.x;
-                        float y1 = pc.y + t1 * d.y;
-                        if (y1 >= 0.0f && y1 <= static_cast<float>(H - 1))
-                            ints.emplace_back(static_cast<float>(W - 1), y1);
+                        dir_pt = pf;
+                        have_dir = true;
                     }
-                    // intersections with y=0 and y=H-1
-                    if (std::abs(d.y) > 1e-9)
-                    {
-                        float t2 = (0.0f - pc.y) / d.y;
-                        float x2 = pc.x + t2 * d.x;
-                        if (x2 >= 0.0f && x2 <= static_cast<float>(W - 1))
-                            ints.emplace_back(x2, 0.0f);
-                        float t3 = (static_cast<float>(H - 1) - pc.y) / d.y;
-                        float x3 = pc.x + t3 * d.x;
-                        if (x3 >= 0.0f && x3 <= static_cast<float>(W - 1))
-                            ints.emplace_back(x3, static_cast<float>(H - 1));
-                    }
+                }
 
-                    // dedupe almost-equal points
-                    std::vector<cv::Point2f> uniq;
-                    for (const auto &p : ints)
+                if (have_dir)
+                {
+                    cv::Point2f d = dir_pt - pc;
+                    if (std::abs(d.x) < 1e-6 && std::abs(d.y) < 1e-6)
                     {
-                        bool found = false;
-                        for (const auto &q : uniq)
-                        {
-                            if (std::hypot(p.x - q.x, p.y - q.y) < 1e-2f)
-                            {
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (!found)
-                            uniq.push_back(p);
-                    }
-
-                    if (uniq.size() >= 2)
-                    {
-                        // pick two most distant points
-                        size_t a = 0, b = 1;
-                        double bestd = 0.0;
-                        for (size_t i = 0; i < uniq.size(); ++i)
-                            for (size_t j = i + 1; j < uniq.size(); ++j)
-                            {
-                                double dd = std::hypot(uniq[i].x - uniq[j].x, uniq[i].y - uniq[j].y);
-                                if (dd > bestd)
-                                {
-                                    bestd = dd;
-                                    a = i;
-                                    b = j;
-                                }
-                            }
-                        cv::line(vis, uniq[a], uniq[b], cv::Scalar(255, 0, 0), 2);
+                        cv::line(vis, cv::Point2f(pc.x - 50.0f, pc.y), cv::Point2f(pc.x + 50.0f, pc.y), color, 2);
                     }
                     else
                     {
-                        // fallback: draw short line from pc toward dir_pt
-                        cv::Point2f p2 = pc + d * 50.0f;
-                        cv::line(vis, pc, p2, cv::Scalar(255, 0, 0), 2);
+                        cv::line(vis, pc, pc + d, color, 2);
                     }
                 }
             }
-        }
 
-        // Optional quantitative 2D evaluation: compare projected 3D axis line vs fitted mask line.
-        if (line_eval_enabled_ && line_eval_ofs_.is_open())
-        {
-            double angle_err_deg = std::numeric_limits<double>::quiet_NaN();
-            double offset_err_px = std::numeric_limits<double>::quiet_NaN();
-            double upper_a = std::numeric_limits<double>::quiet_NaN();
-            double upper_b = std::numeric_limits<double>::quiet_NaN();
-            double upper_c = std::numeric_limits<double>::quiet_NaN();
-            double lower_a = std::numeric_limits<double>::quiet_NaN();
-            double lower_b = std::numeric_limits<double>::quiet_NaN();
-            double lower_c = std::numeric_limits<double>::quiet_NaN();
-            int valid_eval = 0;
-
-            const bool edges_ok = extractUpperLowerEdgeLines(mask_cv, upper_a, upper_b, upper_c, lower_a, lower_b, lower_c);
-
-            std::vector<cv::Point> mask_pts;
-            cv::findNonZero(mask_cv, mask_pts);
-            if (mask_pts.size() >= 20)
+            if (line_eval_enabled_ && line_eval_ofs_.is_open())
             {
-                cv::Vec4f mask_line;
-                cv::fitLine(mask_pts, mask_line, cv::DIST_L2, 0, 0.01, 0.01);
-                cv::Point2f pm(mask_line[2], mask_line[3]);
-                cv::Point2f vm(mask_line[0], mask_line[1]);
+                double angle_err_deg = std::numeric_limits<double>::quiet_NaN();
+                double offset_err_px = std::numeric_limits<double>::quiet_NaN();
+                double upper_a = std::numeric_limits<double>::quiet_NaN();
+                double upper_b = std::numeric_limits<double>::quiet_NaN();
+                double upper_c = std::numeric_limits<double>::quiet_NaN();
+                double lower_a = std::numeric_limits<double>::quiet_NaN();
+                double lower_b = std::numeric_limits<double>::quiet_NaN();
+                double lower_c = std::numeric_limits<double>::quiet_NaN();
+                int valid_eval = 0;
 
-                if (okc)
+                const bool edges_ok = extractUpperLowerEdgeLines(mask_cv, upper_a, upper_b, upper_c, lower_a, lower_b, lower_c);
+                std::vector<cv::Point> mask_pts;
+                cv::findNonZero(mask_cv, mask_pts);
+                if (mask_pts.size() >= 20 && okc && edges_ok)
                 {
+                    cv::Vec4f mask_line;
+                    cv::fitLine(mask_pts, mask_line, cv::DIST_L2, 0, 0.01, 0.01);
+                    cv::Point2f pm(mask_line[2], mask_line[3]);
+                    cv::Point2f vm(mask_line[0], mask_line[1]);
+
                     std::vector<cv::Point2f> proj_samples;
                     proj_samples.reserve(10);
                     const std::array<double, 10> scales = {-40.0, -20.0, -10.0, -5.0, -2.0, 2.0, 5.0, 10.0, 20.0, 40.0};
@@ -545,20 +506,7 @@ namespace axispose
                             proj_samples.push_back(pp);
                     }
 
-                    cv::Point2f ve;
-                    if (proj_samples.size() >= 2)
-                    {
-                        ve = proj_samples.back() - proj_samples.front();
-                    }
-                    else if (eval_have_dir)
-                    {
-                        ve = eval_dir_pt - pc;
-                    }
-                    else
-                    {
-                        ve = cv::Point2f(0.0f, 0.0f);
-                    }
-
+                    cv::Point2f ve = proj_samples.size() >= 2 ? proj_samples.back() - proj_samples.front() : cv::Point2f(0.0f, 0.0f);
                     const float ne = std::sqrt(ve.x * ve.x + ve.y * ve.y);
                     const float nm = std::sqrt(vm.x * vm.x + vm.y * vm.y);
                     if (ne > 1e-6f && nm > 1e-6f)
@@ -568,8 +516,6 @@ namespace axispose
                         float dot = std::abs(ve_n.x * vm_n.x + ve_n.y * vm_n.y);
                         dot = std::max(-1.0f, std::min(1.0f, dot));
                         angle_err_deg = std::acos(dot) * 180.0 / M_PI;
-
-                        // Signed normal form for projected estimated line through center with direction ve_n.
                         const double A = -static_cast<double>(ve_n.y);
                         const double B = static_cast<double>(ve_n.x);
                         const double C = -(A * pc.x + B * pc.y);
@@ -577,34 +523,22 @@ namespace axispose
                         valid_eval = 1;
                     }
                 }
-            }
 
-            line_eval_ofs_ << line_eval_counter_ << ","
-                           << pose_msg->header.stamp.sec << ","
-                           << pose_msg->header.stamp.nanosec << ",";
-            if (valid_eval)
-            {
-                line_eval_ofs_ << angle_err_deg << "," << offset_err_px;
+                line_eval_ofs_ << line_eval_counter_ << ","
+                               << pose_array_msg->header.stamp.sec << ","
+                               << pose_array_msg->header.stamp.nanosec << ","
+                               << object_item.track_id << ","
+                               << angle_err_deg << ","
+                               << offset_err_px << ","
+                               << upper_a << "," << upper_b << "," << upper_c << ","
+                               << lower_a << "," << lower_b << "," << lower_c << ","
+                               << valid_eval << "\n";
             }
-            else
-            {
-                line_eval_ofs_ << ",";
-            }
-            line_eval_ofs_ << ",";
-            if (edges_ok)
-            {
-                line_eval_ofs_ << upper_a << "," << upper_b << "," << upper_c << ","
-                               << lower_a << "," << lower_b << "," << lower_c;
-            }
-            else
-            {
-                line_eval_ofs_ << ",,,,,";
-            }
-            line_eval_ofs_ << "," << valid_eval << "\n";
-            if ((save_counter_ % 10) == 0)
-            {
-                line_eval_ofs_.flush();
-            }
+        }
+
+        if (line_eval_enabled_ && line_eval_ofs_.is_open())
+        {
+            line_eval_ofs_.flush();
             line_eval_counter_++;
         }
 

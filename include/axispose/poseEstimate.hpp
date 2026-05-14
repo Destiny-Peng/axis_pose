@@ -7,6 +7,10 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 
+#include <axispose_msgs/msg/tracked_object_array.hpp>
+#include <axispose_msgs/msg/tracked_pose.hpp>
+#include <axispose_msgs/msg/tracked_pose_array.hpp>
+
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
 #include <message_filters/sync_policies/approximate_time.h>
@@ -36,6 +40,8 @@
 #include <memory>
 #include <atomic>
 #include <array>
+#include <mutex>
+#include <unordered_map>
 #include <Eigen/Core>
 #include <Eigen/Dense>
 
@@ -51,7 +57,8 @@ namespace axispose
     protected:
         using Image = sensor_msgs::msg::Image;
         using CameraInfo = sensor_msgs::msg::CameraInfo;
-        using ApproxSyncPolicy = message_filters::sync_policies::ApproximateTime<Image, Image>;
+        using TrackedObjectArray = axispose_msgs::msg::TrackedObjectArray;
+        using ApproxSyncPolicy = message_filters::sync_policies::ApproximateTime<Image, TrackedObjectArray>;
 
         virtual geometry_msgs::msg::PoseStamped computePoseByAlgorithm(
             pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud,
@@ -63,11 +70,18 @@ namespace axispose
         geometry_msgs::msg::PoseStamped computePoseFromSACLine(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const rclcpp::Time &stamp);
         geometry_msgs::msg::PoseStamped computePoseGaussian(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const cv::Mat &mask_cv, const rclcpp::Time &stamp);
         geometry_msgs::msg::PoseStamped computePoseCeres(pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud, const cv::Mat &mask_cv, const rclcpp::Time &stamp);
+        geometry_msgs::msg::PoseStamped computePoseFromDepthAndMask(const cv::Mat &depth_cv, const cv::Mat &mask_cv, const rclcpp::Time &stamp, size_t *out_valid_points = nullptr);
+        geometry_msgs::msg::PoseStamped applyKalmanFilterToTrackedPose(uint32_t track_id, const geometry_msgs::msg::PoseStamped &raw_pose, const rclcpp::Time &stamp);
+        void resetTrackedKalmanState(uint32_t track_id, const Eigen::Vector3d &position, const Eigen::Vector3d &axis, double stamp_s);
+        axispose_msgs::msg::TrackedPose buildTrackedPoseMessage(uint32_t track_id,
+                                                                const axispose_msgs::msg::TrackedObject &object,
+                                                                const geometry_msgs::msg::PoseStamped &pose_msg,
+                                                                size_t valid_points) const;
 
     private:
         // Subscribers and synchronizer
         message_filters::Subscriber<Image> depth_sub_;
-        message_filters::Subscriber<Image> mask_sub_;
+        message_filters::Subscriber<TrackedObjectArray> tracked_objects_sub_;
         std::shared_ptr<message_filters::Synchronizer<ApproxSyncPolicy>> sync_;
 
         rclcpp::Subscription<CameraInfo>::SharedPtr camera_info_color_sub_;
@@ -75,6 +89,7 @@ namespace axispose
 
         // Publishers
         rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
+        rclcpp::Publisher<axispose_msgs::msg::TrackedPoseArray>::SharedPtr tracked_pose_pub_;
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_cloud_pub_;
 
         // Intrinsics (stored as OpenCV camera matrices for readability and consistency).
@@ -114,6 +129,7 @@ namespace axispose
         void cameraInfoDepthCallback(const CameraInfo::SharedPtr msg);
         void cameraInfoColorCallback(const CameraInfo::SharedPtr msg);
         void syncCallback(const Image::ConstSharedPtr depth_msg, const Image::ConstSharedPtr mask_msg);
+        void syncTrackedObjectsCallback(const Image::ConstSharedPtr depth_msg, const TrackedObjectArray::ConstSharedPtr tracked_objects_msg);
 
         // Helpers
         pcl::PointCloud<pcl::PointXYZ>::Ptr depthMaskToPointCloud(const cv::Mat &depth);
@@ -146,6 +162,23 @@ namespace axispose
         Eigen::Vector3d kalman_axis_v_{Eigen::Vector3d::Zero()};
         std::array<Eigen::Matrix2d, 3> kalman_pos_P_;
         std::array<Eigen::Matrix2d, 3> kalman_axis_P_;
+
+        struct TrackKalmanState
+        {
+            bool initialized{false};
+            double last_stamp_s{0.0};
+            bool axis_history_valid{false};
+            Eigen::Vector3d axis_history{1.0, 0.0, 0.0};
+            Eigen::Vector3d pos_x{Eigen::Vector3d::Zero()};
+            Eigen::Vector3d pos_v{Eigen::Vector3d::Zero()};
+            Eigen::Vector3d axis_x{Eigen::Vector3d::UnitX()};
+            Eigen::Vector3d axis_v{Eigen::Vector3d::Zero()};
+            std::array<Eigen::Matrix2d, 3> pos_P{};
+            std::array<Eigen::Matrix2d, 3> axis_P{};
+        };
+
+        std::unordered_map<uint32_t, TrackKalmanState> tracked_kalman_states_;
+        std::mutex tracked_kalman_mutex_;
     };
 
     class PoseEstimatePCA : public PoseEstimateBase

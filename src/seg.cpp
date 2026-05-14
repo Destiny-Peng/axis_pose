@@ -19,6 +19,7 @@ namespace axispose
         this->declare_parameter<std::string>("engine", "");
         this->declare_parameter<std::string>("color_image_topic", "/camera/color/image_raw");
         this->declare_parameter<std::string>("mask_topic", "/yolo/mask");
+        this->declare_parameter<std::string>("tracked_object_topic", "/yolo/tracked_objects");
         this->declare_parameter<bool>("tracking_enabled", true);
         this->declare_parameter<int>("lost_grace_frames", 12);
         this->declare_parameter<int>("reacquire_confirm_frames", 2);
@@ -29,6 +30,7 @@ namespace axispose
         const std::string engine_path = this->get_parameter("engine").as_string();
         const std::string color_topic = this->get_parameter("color_image_topic").as_string();
         const std::string mask_topic = this->get_parameter("mask_topic").as_string();
+        const std::string tracked_object_topic = this->get_parameter("tracked_object_topic").as_string();
         tracking_enabled_ = this->get_parameter("tracking_enabled").as_bool();
         lost_grace_frames_ = std::max(0, static_cast<int>(this->get_parameter("lost_grace_frames").as_int()));
         reacquire_confirm_frames_ = std::max(1, static_cast<int>(this->get_parameter("reacquire_confirm_frames").as_int()));
@@ -49,19 +51,21 @@ namespace axispose
             color_topic, rclcpp::QoS(rclcpp::KeepLast(5)).reliable(), std::bind(&SegmentNode::image_callback, this, _1));
 
         pub_ = this->create_publisher<sensor_msgs::msg::Image>(mask_topic, 1);
+        tracked_objects_pub_ = this->create_publisher<axispose_msgs::msg::TrackedObjectArray>(tracked_object_topic, 1);
         if (!debug_topic_.empty())
         {
             debug_pub_ = this->create_publisher<std_msgs::msg::String>(debug_topic_, 1);
         }
 
         RCLCPP_INFO(this->get_logger(), "Segment node initialized. Engine: %s", engine_path.c_str());
-        RCLCPP_INFO(this->get_logger(), "Segment tracking: enabled=%d grace=%d confirm=%d iou_min=%.3f center_dist_ratio=%.3f debug_topic=%s",
+        RCLCPP_INFO(this->get_logger(), "Segment tracking: enabled=%d grace=%d confirm=%d iou_min=%.3f center_dist_ratio=%.3f debug_topic=%s tracked_object_topic=%s",
                     tracking_enabled_ ? 1 : 0,
                     lost_grace_frames_,
                     reacquire_confirm_frames_,
                     iou_keep_min_,
                     center_dist_max_ratio_,
-                    debug_topic_.c_str());
+                    debug_topic_.c_str(),
+                    tracked_object_topic.c_str());
     }
 
     double SegmentNode::computeIoU(const cv::Rect &lhs, const cv::Rect &rhs)
@@ -185,6 +189,28 @@ namespace axispose
         return oss.str();
     }
 
+    axispose_msgs::msg::TrackedObject SegmentNode::buildTrackedObjectMessage(const TrackCandidate &candidate,
+                                                                             const std_msgs::msg::Header &header,
+                                                                             uint32_t track_id,
+                                                                             uint8_t status) const
+    {
+        axispose_msgs::msg::TrackedObject msg;
+        msg.header = header;
+        msg.track_id = track_id;
+        msg.class_id = -1;
+        msg.score = candidate.confidence;
+        msg.status = status;
+        msg.age = 1;
+        msg.lost_frames = 0;
+        msg.bbox.x_offset = static_cast<uint32_t>(std::max(0, candidate.bbox.x));
+        msg.bbox.y_offset = static_cast<uint32_t>(std::max(0, candidate.bbox.y));
+        msg.bbox.width = static_cast<uint32_t>(std::max(0, candidate.bbox.width));
+        msg.bbox.height = static_cast<uint32_t>(std::max(0, candidate.bbox.height));
+        msg.bbox.do_rectify = false;
+        msg.mask = *cv_bridge::CvImage(header, "mono8", candidate.mask).toImageMsg();
+        return msg;
+    }
+
     void SegmentNode::image_callback(const sensor_msgs::msg::Image::SharedPtr msg)
     {
         try
@@ -251,6 +277,18 @@ namespace axispose
                 candidate.confidence = (i < result.scores.size()) ? result.scores[i] : 0.0f;
                 candidate.mask = std::move(candidate_mask);
                 candidates.push_back(std::move(candidate));
+            }
+
+            axispose_msgs::msg::TrackedObjectArray tracked_objects_msg;
+            tracked_objects_msg.header = msg->header;
+            tracked_objects_msg.objects.reserve(candidates.size());
+            for (const auto &candidate : candidates)
+            {
+                const bool is_selected = track_active_ && candidate.index == tracked_index_;
+                const uint8_t status = is_selected ? axispose_msgs::msg::TrackedObject::STATUS_CONFIRMED
+                                                   : axispose_msgs::msg::TrackedObject::STATUS_TENTATIVE;
+                tracked_objects_msg.objects.push_back(
+                    buildTrackedObjectMessage(candidate, msg->header, static_cast<uint32_t>(candidate.index >= 0 ? candidate.index + 1 : 0), status));
             }
 
             cv::Mat output_mask = cv::Mat::zeros(image.rows, image.cols, CV_8UC1);
@@ -419,6 +457,10 @@ namespace axispose
 
             auto out_msg = cv_bridge::CvImage(msg->header, "mono8", output_mask).toImageMsg();
             pub_->publish(*out_msg);
+            if (tracked_objects_pub_)
+            {
+                tracked_objects_pub_->publish(tracked_objects_msg);
+            }
         }
         catch (const std::exception &e)
         {
