@@ -103,15 +103,39 @@ namespace axispose
         double best_score = -std::numeric_limits<double>::infinity();
         const cv::Point2d image_center(static_cast<double>(frame_size.width) * 0.5, static_cast<double>(frame_size.height) * 0.5);
 
-        for (const auto &candidate : candidates)
+        RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                     "[selectInitialCandidate] Finding initial candidate from %zu candidates", candidates.size());
+
+        for (size_t i = 0; i < candidates.size(); ++i)
         {
+            const auto &candidate = candidates[i];
             const double center_dist_norm = computeNormalizedCenterDistance(candidate.center, image_center, frame_size);
             const double score = candidate.area - center_dist_norm * candidate.area * 0.2 + static_cast<double>(candidate.confidence) * 10.0;
+
+            RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                         "  [%zu] bbox:(%d,%d,%d,%d) center:(%.1f,%.1f) area:%.0f conf:%.3f center_dist_norm=%.4f score=%.2f",
+                         i, candidate.bbox.x, candidate.bbox.y, candidate.bbox.width, candidate.bbox.height,
+                         candidate.center.x, candidate.center.y, candidate.area, candidate.confidence, center_dist_norm, score);
+
             if (score > best_score)
             {
+                RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                             "    → NEW BEST (prev_best_score=%.2f)", best_score);
                 best_score = score;
                 best_candidate = candidate;
             }
+        }
+
+        if (best_candidate.index >= 0)
+        {
+            RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                         "[selectInitialCandidate] SELECTED candidate[%d] with score=%.2f",
+                         best_candidate.index, best_score);
+        }
+        else
+        {
+            RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                         "[selectInitialCandidate] NO CANDIDATE (best_score=%.2f)", best_score);
         }
 
         return best_candidate;
@@ -124,21 +148,58 @@ namespace axispose
         double best_iou = 0.0;
         double best_center_dist_norm = std::numeric_limits<double>::infinity();
 
-        for (const auto &candidate : candidates)
+        RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                     "[selectTrackCandidate] Tracked bbox: (%d,%d,%d,%d) center:(%.1f,%.1f) candidates=%zu",
+                     tracked_bbox_.x, tracked_bbox_.y, tracked_bbox_.width, tracked_bbox_.height,
+                     tracked_center_.x, tracked_center_.y, candidates.size());
+
+        for (size_t i = 0; i < candidates.size(); ++i)
         {
+            const auto &candidate = candidates[i];
             const double iou = computeIoU(candidate.bbox, tracked_bbox_);
             const double center_dist_norm = computeNormalizedCenterDistance(candidate.center, tracked_center_, frame_size);
+
+            RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                         "  [%zu] bbox:(%d,%d,%d,%d) center:(%.1f,%.1f) area:%.0f conf:%.3f iou=%.4f center_dist=%.4f",
+                         i, candidate.bbox.x, candidate.bbox.y, candidate.bbox.width, candidate.bbox.height,
+                         candidate.center.x, candidate.center.y, candidate.area, candidate.confidence, iou, center_dist_norm);
+
             if (iou < iou_keep_min_ && center_dist_norm > center_dist_max_ratio_)
+            {
+                RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                             "    → FILTERED OUT (iou=%.4f<%f || center_dist=%.4f>%f)",
+                             iou, iou_keep_min_, center_dist_norm, center_dist_max_ratio_);
                 continue;
+            }
 
             const double score = std::clamp(iou, 0.0, 1.0) * 0.7 + (1.0 - std::min(center_dist_norm / std::max(center_dist_max_ratio_, 1e-6), 1.0)) * 0.25 + static_cast<double>(candidate.confidence) * 0.05;
+            RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                         "    → score=%.4f (iou*0.7=%.4f + center_dist*0.25=%.4f + conf*0.05=%.4f)",
+                         score, std::clamp(iou, 0.0, 1.0) * 0.7,
+                         (1.0 - std::min(center_dist_norm / std::max(center_dist_max_ratio_, 1e-6), 1.0)) * 0.25,
+                         static_cast<double>(candidate.confidence) * 0.05);
+
             if (score > best_score)
             {
+                RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                             "    → NEW BEST (prev_best_score=%.4f)", best_score);
                 best_score = score;
                 best_candidate = candidate;
                 best_iou = iou;
                 best_center_dist_norm = center_dist_norm;
             }
+        }
+
+        if (best_candidate.index >= 0)
+        {
+            RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                         "[selectTrackCandidate] SELECTED candidate[%d]: iou=%.4f center_dist=%.4f score=%.4f",
+                         best_candidate.index, best_iou, best_center_dist_norm, best_score);
+        }
+        else
+        {
+            RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                         "[selectTrackCandidate] NO VALID CANDIDATE (best_score=%.4f)", best_score);
         }
 
         if (out_iou)
@@ -279,18 +340,7 @@ namespace axispose
                 candidates.push_back(std::move(candidate));
             }
 
-            axispose_msgs::msg::TrackedObjectArray tracked_objects_msg;
-            tracked_objects_msg.header = msg->header;
-            tracked_objects_msg.objects.reserve(candidates.size());
-            for (const auto &candidate : candidates)
-            {
-                const bool is_selected = track_active_ && candidate.index == tracked_index_;
-                const uint8_t status = is_selected ? axispose_msgs::msg::TrackedObject::STATUS_CONFIRMED
-                                                   : axispose_msgs::msg::TrackedObject::STATUS_TENTATIVE;
-                tracked_objects_msg.objects.push_back(
-                    buildTrackedObjectMessage(candidate, msg->header, static_cast<uint32_t>(candidate.index >= 0 ? candidate.index + 1 : 0), status));
-            }
-
+            // First, run the state machine to update tracked_index_ and current_track_id_
             cv::Mat output_mask = cv::Mat::zeros(image.rows, image.cols, CV_8UC1);
             std::string state = "empty";
             int selected_index = -1;
@@ -345,14 +395,19 @@ namespace axispose
                     state = (lost_frames_ > lost_grace_frames_) ? "released" : "lost";
                     if (lost_frames_ > lost_grace_frames_)
                     {
+                        RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                                     "→ RELEASED (no candidates): track_id=%d", current_track_id_);
                         track_active_ = false;
                         tracked_index_ = -1;
+                        current_track_id_ = 0;
                         pending_confirm_count_ = 0;
                     }
                 }
             }
             else if (track_active_)
             {
+                RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                             "=== LOCKED STATE: permanent_track_id=%d candidates=%zu", current_track_id_, candidates.size());
                 TrackCandidate best_candidate = selectTrackCandidate(candidates, image.size(), &matched_iou, &matched_center_dist_norm);
                 if (best_candidate.index >= 0)
                 {
@@ -366,15 +421,23 @@ namespace axispose
                     selected_index = best_candidate.index;
                     selected_candidate = &best_candidate;
                     state = "locked";
+                    RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                                 "→ STAY LOCKED: track_id=%d matched with detection[%d]", current_track_id_, best_candidate.index);
                 }
                 else
                 {
                     ++lost_frames_;
                     state = (lost_frames_ > lost_grace_frames_) ? "released" : "lost";
+                    RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                                 "→ NO MATCH: track_id=%d transition to %s (lost_frames=%d/%d)",
+                                 current_track_id_, state.c_str(), lost_frames_, lost_grace_frames_);
                     if (lost_frames_ > lost_grace_frames_)
                     {
+                        RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                                     "→ RELEASED: track_id=%d is now released", current_track_id_);
                         track_active_ = false;
                         tracked_index_ = -1;
+                        current_track_id_ = 0;
                         pending_confirm_count_ = 0;
                     }
                 }
@@ -421,6 +484,7 @@ namespace axispose
                     if (pending_confirm_count_ >= reacquire_confirm_frames_)
                     {
                         track_active_ = true;
+                        current_track_id_ = next_track_id_++;
                         lost_frames_ = 0;
                         tracked_index_ = best_initial_candidate.index;
                         tracked_bbox_ = best_initial_candidate.bbox;
@@ -432,6 +496,8 @@ namespace axispose
                         selected_candidate = &best_initial_candidate;
                         pending_confirm_count_ = 0;
                         state = "locked";
+                        RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                                     "→ CONFIRMED LOCK: assigned permanent track_id=%d", current_track_id_);
                     }
                     else
                     {
@@ -453,6 +519,34 @@ namespace axispose
                                                   matched_iou,
                                                   matched_center_dist_norm);
                 debug_pub_->publish(debug_msg);
+            }
+
+            // NOW build and publish tracked_objects_msg based on updated tracked_index_ and current_track_id_
+            axispose_msgs::msg::TrackedObjectArray tracked_objects_msg;
+            tracked_objects_msg.header = msg->header;
+            tracked_objects_msg.objects.reserve(candidates.size());
+            for (const auto &candidate : candidates)
+            {
+                const bool is_selected = track_active_ && candidate.index == tracked_index_;
+                const uint8_t status = is_selected ? axispose_msgs::msg::TrackedObject::STATUS_CONFIRMED
+                                                   : axispose_msgs::msg::TrackedObject::STATUS_TENTATIVE;
+                // For confirmed tracks (LOCKED), use permanent track_id; for tentative detections, use 0
+                uint32_t track_id = is_selected ? current_track_id_ : 0U;
+                tracked_objects_msg.objects.push_back(
+                    buildTrackedObjectMessage(candidate, msg->header, track_id, status));
+            }
+
+            // Print all track assignments for debugging (after state machine)
+            RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                         "[MSG OUTPUT] Publishing %zu objects:", tracked_objects_msg.objects.size());
+            for (size_t i = 0; i < tracked_objects_msg.objects.size(); ++i)
+            {
+                const auto &obj = tracked_objects_msg.objects[i];
+                RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
+                             "  [%zu] track_id=%d status=%s bbox:(%d,%d,%d,%d)",
+                             i, obj.track_id,
+                             (obj.status == axispose_msgs::msg::TrackedObject::STATUS_CONFIRMED) ? "CONFIRMED" : "TENTATIVE",
+                             obj.bbox.x_offset, obj.bbox.y_offset, obj.bbox.width, obj.bbox.height);
             }
 
             auto out_msg = cv_bridge::CvImage(msg->header, "mono8", output_mask).toImageMsg();

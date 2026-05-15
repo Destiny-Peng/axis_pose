@@ -63,6 +63,8 @@ namespace axispose
         bool tracking_enabled_{true};
         bool track_active_{false};
         int tracked_index_{-1};
+        uint32_t current_track_id_{0}; // Persistent track ID for the currently tracked object
+        uint32_t next_track_id_{1};    // Next available track ID to assign
         cv::Rect tracked_bbox_;
         cv::Point2d tracked_center_{0.0, 0.0};
         double tracked_area_{0.0};

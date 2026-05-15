@@ -44,6 +44,7 @@
 #include <unordered_map>
 #include <Eigen/Core>
 #include <Eigen/Dense>
+#include <vector>
 
 namespace axispose
 {
@@ -117,6 +118,13 @@ namespace axispose
         int ceres_max_points_ = 90;
         double ceres_weight_2d_ = 3.0;
         double ceres_weight_pos_ = 20.0;
+        double ceres_weight_3d_pos_ = 1.0;
+
+        // (no mutex for parameter updates; parameter callbacks use ParameterEventHandler)
+
+        // ParameterEventHandler for per-parameter callbacks (keeps handles alive)
+        std::shared_ptr<rclcpp::ParameterEventHandler> param_subscriber_;
+        std::vector<std::shared_ptr<rclcpp::ParameterCallbackHandle>> parameter_cb_handles_;
 
         // Debug manager (runtime flags via parameter `debug_flags`)
         std::shared_ptr<DebugManager> debug_;

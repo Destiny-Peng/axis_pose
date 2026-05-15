@@ -10,7 +10,7 @@ namespace axispose
     // 3D residual for Plucker line (d, m): p x d = m.
     struct PointToLineResidual
     {
-        explicit PointToLineResidual(const Eigen::Vector3d &point) : pt(point) {}
+        explicit PointToLineResidual(const Eigen::Vector3d &point, double weight) : pt(point), weight_(weight) {}
 
         template <typename T>
         bool operator()(const T *const plucker, T *residual) const
@@ -22,18 +22,19 @@ namespace axispose
             T cross[3];
             ceres::CrossProduct(p, d, cross);
 
-            residual[0] = cross[0] - m[0];
-            residual[1] = cross[1] - m[1];
-            residual[2] = cross[2] - m[2];
+            residual[0] = T(weight_) * (cross[0] - m[0]);
+            residual[1] = T(weight_) * (cross[1] - m[1]);
+            residual[2] = T(weight_) * (cross[2] - m[2]);
             return true;
         }
 
         Eigen::Vector3d pt;
+        double weight_ = 1.0;
 
-        static ceres::CostFunction *Create(const Eigen::Vector3d &point)
+        static ceres::CostFunction *Create(const Eigen::Vector3d &point, double weight)
         {
             return new ceres::AutoDiffCostFunction<PointToLineResidual, 3, 6>(
-                new PointToLineResidual(point));
+                new PointToLineResidual(point, weight));
         }
     };
 
@@ -173,7 +174,8 @@ namespace axispose
                                            int max_iterations,
                                            int max_points,
                                            double weight_2d,
-                                           double weight_pos)
+                                           double weight_pos,
+                                           double weight_3d_pos)
     {
         if (!cloud || cloud->empty())
         {
@@ -204,7 +206,7 @@ namespace axispose
             const auto &point = cloud->points[static_cast<size_t>(idx)];
             Eigen::Vector3d pt(point.x, point.y, point.z);
 
-            ceres::CostFunction *cost_3d = PointToLineResidual::Create(pt);
+            ceres::CostFunction *cost_3d = PointToLineResidual::Create(pt, weight_3d_pos);
             problem.AddResidualBlock(cost_3d, new ceres::HuberLoss(0.03), plucker_arr);
 
             ceres::CostFunction *cost_2d = ReprojectionLineResidual::Create(pt, K, line2d_abc, weight_2d);

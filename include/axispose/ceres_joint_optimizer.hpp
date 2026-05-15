@@ -26,7 +26,8 @@ namespace axispose
                           int max_iterations = 15,
                           int max_points = 120,
                           double weight_2d = 4.0,
-                          double weight_pos = 1.0);
+                          double weight_pos = 1.0,
+                          double weight_3d_pos = 1.0);
     };
 
 } // namespace axispose

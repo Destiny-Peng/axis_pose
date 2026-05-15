@@ -34,6 +34,7 @@ namespace axispose
         this->declare_parameter("ceres_max_points", ceres_max_points_);
         this->declare_parameter("ceres_weight_2d", ceres_weight_2d_);
         this->declare_parameter("ceres_weight_pos", ceres_weight_pos_);
+        this->declare_parameter("ceres_weight_3d_pos", ceres_weight_3d_pos_);
 
         // statistics parameters
         this->declare_parameter("statistics_directory_path", statistics_directory_path_);
@@ -66,6 +67,7 @@ namespace axispose
         ceres_max_points_ = this->get_parameter("ceres_max_points").as_int();
         ceres_weight_2d_ = this->get_parameter("ceres_weight_2d").as_double();
         ceres_weight_pos_ = this->get_parameter("ceres_weight_pos").as_double();
+        ceres_weight_3d_pos_ = this->get_parameter("ceres_weight_3d_pos").as_double();
         kalman_enabled_ = this->get_parameter("kalman_enabled").as_bool();
         kalman_position_process_noise_ = this->get_parameter("kalman_position_process_noise").as_double();
         kalman_position_measurement_noise_ = this->get_parameter("kalman_position_measurement_noise").as_double();
@@ -87,8 +89,8 @@ namespace axispose
                         kalman_min_dt_,
                         kalman_max_dt_);
         }
-        RCLCPP_INFO(this->get_logger(), "Ceres params: iter=%d points=%d w2d=%.3f wpos=%.3f",
-                    ceres_max_iterations_, ceres_max_points_, ceres_weight_2d_, ceres_weight_pos_);
+        RCLCPP_INFO(this->get_logger(), "Ceres params: iter=%d points=%d w2d=%.3f wpos=%.3f w3d=%.3f",
+                    ceres_max_iterations_, ceres_max_points_, ceres_weight_2d_, ceres_weight_pos_, ceres_weight_3d_pos_);
 
         rclcpp::QoS qos(rclcpp::KeepLast(5));
         // message_filters subscribers
@@ -130,6 +132,89 @@ namespace axispose
             // continue without metrics
             benchmark_.reset();
         }
+
+        // register ParameterEventHandler callbacks for runtime tuning (per-parameter)
+        param_subscriber_ = std::make_shared<rclcpp::ParameterEventHandler>(this);
+
+        parameter_cb_handles_.push_back(param_subscriber_->add_parameter_callback("kalman_position_process_noise", [this](const rclcpp::Parameter &p)
+                                                                                  {
+                                                                                      if (p.get_name() == "kalman_position_process_noise")
+                                                                                      {
+                                                                                          kalman_position_process_noise_ = p.as_double();
+                                                                                          RCLCPP_INFO(this->get_logger(), "param updated: kalman_position_process_noise=%.6f", kalman_position_process_noise_);
+                                                                                      } }));
+
+        parameter_cb_handles_.push_back(param_subscriber_->add_parameter_callback("kalman_position_measurement_noise", [this](const rclcpp::Parameter &p)
+                                                                                  {
+                                                                                      if (p.get_name() == "kalman_position_measurement_noise")
+                                                                                      {
+                                                                                          kalman_position_measurement_noise_ = p.as_double();
+                                                                                          RCLCPP_INFO(this->get_logger(), "param updated: kalman_position_measurement_noise=%.6f", kalman_position_measurement_noise_);
+                                                                                      } }));
+
+        parameter_cb_handles_.push_back(param_subscriber_->add_parameter_callback("kalman_axis_process_noise", [this](const rclcpp::Parameter &p)
+                                                                                  {
+                                                                                      if (p.get_name() == "kalman_axis_process_noise")
+                                                                                      {
+                                                                                          kalman_axis_process_noise_ = p.as_double();
+                                                                                          RCLCPP_INFO(this->get_logger(), "param updated: kalman_axis_process_noise=%.6f", kalman_axis_process_noise_);
+                                                                                      } }));
+
+        parameter_cb_handles_.push_back(param_subscriber_->add_parameter_callback("kalman_axis_measurement_noise", [this](const rclcpp::Parameter &p)
+                                                                                  {
+                                                                                      if (p.get_name() == "kalman_axis_measurement_noise")
+                                                                                      {
+                                                                                          kalman_axis_measurement_noise_ = p.as_double();
+                                                                                          RCLCPP_INFO(this->get_logger(), "param updated: kalman_axis_measurement_noise=%.6f", kalman_axis_measurement_noise_);
+                                                                                      } }));
+
+        parameter_cb_handles_.push_back(param_subscriber_->add_parameter_callback("kalman_initial_covariance", [this](const rclcpp::Parameter &p)
+                                                                                  {
+                                                                                      if (p.get_name() == "kalman_initial_covariance")
+                                                                                      {
+                                                                                          kalman_initial_covariance_ = p.as_double();
+                                                                                          RCLCPP_INFO(this->get_logger(), "param updated: kalman_initial_covariance=%.6f", kalman_initial_covariance_);
+                                                                                      } }));
+
+        parameter_cb_handles_.push_back(param_subscriber_->add_parameter_callback("kalman_min_dt", [this](const rclcpp::Parameter &p)
+                                                                                  {
+                                                                                      if (p.get_name() == "kalman_min_dt")
+                                                                                      {
+                                                                                          kalman_min_dt_ = p.as_double();
+                                                                                          RCLCPP_INFO(this->get_logger(), "param updated: kalman_min_dt=%.6f", kalman_min_dt_);
+                                                                                      } }));
+
+        parameter_cb_handles_.push_back(param_subscriber_->add_parameter_callback("kalman_max_dt", [this](const rclcpp::Parameter &p)
+                                                                                  {
+                                                                                      if (p.get_name() == "kalman_max_dt")
+                                                                                      {
+                                                                                          kalman_max_dt_ = p.as_double();
+                                                                                          RCLCPP_INFO(this->get_logger(), "param updated: kalman_max_dt=%.6f", kalman_max_dt_);
+                                                                                      } }));
+
+        parameter_cb_handles_.push_back(param_subscriber_->add_parameter_callback("ceres_weight_2d", [this](const rclcpp::Parameter &p)
+                                                                                  {
+                                                                                      if (p.get_name() == "ceres_weight_2d")
+                                                                                      {
+                                                                                          ceres_weight_2d_ = p.as_double();
+                                                                                          RCLCPP_INFO(this->get_logger(), "param updated: ceres_weight_2d=%.6f", ceres_weight_2d_);
+                                                                                      } }));
+
+        parameter_cb_handles_.push_back(param_subscriber_->add_parameter_callback("ceres_weight_pos", [this](const rclcpp::Parameter &p)
+                                                                                  {
+                                                                                      if (p.get_name() == "ceres_weight_pos")
+                                                                                      {
+                                                                                          ceres_weight_pos_ = p.as_double();
+                                                                                          RCLCPP_INFO(this->get_logger(), "param updated: ceres_weight_pos=%.6f", ceres_weight_pos_);
+                                                                                      } }));
+
+        parameter_cb_handles_.push_back(param_subscriber_->add_parameter_callback("ceres_weight_3d_pos", [this](const rclcpp::Parameter &p)
+                                                                                  {
+                                                                                      if (p.get_name() == "ceres_weight_3d_pos")
+                                                                                      {
+                                                                                          ceres_weight_3d_pos_ = p.as_double();
+                                                                                          RCLCPP_INFO(this->get_logger(), "param updated: ceres_weight_3d_pos=%.6f", ceres_weight_3d_pos_);
+                                                                                      } }));
     }
 
     void PoseEstimateBase::cameraInfoDepthCallback(const CameraInfo::SharedPtr msg)
@@ -1094,7 +1179,8 @@ namespace axispose
             std::max(1, ceres_max_iterations_),
             std::max(8, ceres_max_points_),
             std::max(0.0, ceres_weight_2d_),
-            std::max(0.0, ceres_weight_pos_));
+            std::max(0.0, ceres_weight_pos_),
+            std::max(0.0, ceres_weight_3d_pos_));
         if (!ok)
         {
             RCLCPP_WARN(this->get_logger(), "Ceres optimizer failed, fallback to PCA pose");
