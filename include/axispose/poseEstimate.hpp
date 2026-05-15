@@ -136,7 +136,6 @@ namespace axispose
         // Callbacks
         void cameraInfoDepthCallback(const CameraInfo::SharedPtr msg);
         void cameraInfoColorCallback(const CameraInfo::SharedPtr msg);
-        void syncCallback(const Image::ConstSharedPtr depth_msg, const Image::ConstSharedPtr mask_msg);
         void syncTrackedObjectsCallback(const Image::ConstSharedPtr depth_msg, const TrackedObjectArray::ConstSharedPtr tracked_objects_msg);
 
         // Helpers

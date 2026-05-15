@@ -343,21 +343,11 @@ namespace axispose
         }
 
         cv::Mat vis = rgb_cv.clone();
-        struct PoseLookup
-        {
-            const axispose_msgs::msg::TrackedPose *pose{nullptr};
-            const axispose_msgs::msg::TrackedObject *object{nullptr};
-        };
-
-        std::unordered_map<uint32_t, PoseLookup> lookup;
-        lookup.reserve(std::min(pose_array_msg->poses.size(), object_array_msg->objects.size()));
+        std::unordered_map<uint32_t, const axispose_msgs::msg::TrackedPose *> lookup;
+        lookup.reserve(pose_array_msg->poses.size());
         for (const auto &pose_item : pose_array_msg->poses)
         {
-            lookup[pose_item.track_id].pose = &pose_item;
-        }
-        for (const auto &object_item : object_array_msg->objects)
-        {
-            lookup[object_item.track_id].object = &object_item;
+            lookup[pose_item.track_id] = &pose_item;
         }
 
         auto trackColor = [](uint32_t track_id) -> cv::Scalar
@@ -405,12 +395,12 @@ namespace axispose
             cv::addWeighted(color_mask, 0.35, vis, 1, 0.0, vis);
 
             auto it = lookup.find(object_item.track_id);
-            if (it == lookup.end() || it->second.pose == nullptr)
+            if (it == lookup.end() || it->second == nullptr)
             {
                 continue;
             }
 
-            const auto &pose_item = *it->second.pose;
+            const auto &pose_item = *it->second;
             const auto &pose_msg = pose_item.pose.pose;
             geometry_msgs::msg::Point center;
             center.x = pose_msg.position.x;
@@ -433,10 +423,6 @@ namespace axispose
             if (okc)
             {
                 cv::circle(vis, pc, 5, color, -1);
-            }
-
-            if (okc)
-            {
                 cv::Point2f dir_pt = oke ? pe : cv::Point2f(pc.x + 1000.0f * static_cast<float>(axis_dir_e.x()), pc.y + 1000.0f * static_cast<float>(axis_dir_e.y()));
                 cv::Point line_p1(static_cast<int>(std::lround(pc.x - (dir_pt.x - pc.x) * 1000.0f)),
                                   static_cast<int>(std::lround(pc.y - (dir_pt.y - pc.y) * 1000.0f)));
