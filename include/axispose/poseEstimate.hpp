@@ -89,7 +89,6 @@ namespace axispose
         rclcpp::Subscription<CameraInfo>::SharedPtr camera_info_depth_sub_;
 
         // Publishers
-        rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
         rclcpp::Publisher<axispose_msgs::msg::TrackedPoseArray>::SharedPtr tracked_pose_pub_;
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_cloud_pub_;
 
@@ -119,6 +118,7 @@ namespace axispose
         double ceres_weight_2d_ = 3.0;
         double ceres_weight_pos_ = 20.0;
         double ceres_weight_3d_pos_ = 1.0;
+        double x_plane_d_ = 0.0;
 
         // (no mutex for parameter updates; parameter callbacks use ParameterEventHandler)
 
@@ -144,6 +144,9 @@ namespace axispose
         cv::Mat alignDepthToColor(const cv::Mat &depth, int color_width, int color_height);
         void denoisePointCloud(pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud);
         Eigen::Vector3d stabilizeAxisDirection(const Eigen::Vector3d &axis, const Eigen::Vector3d *reference_axis = nullptr);
+        // Variant that does not use or update node-global temporal history.
+        // Use this from per-frame compute functions to avoid cross-track contamination.
+        Eigen::Vector3d stabilizeAxisNoHistory(const Eigen::Vector3d &axis, const Eigen::Vector3d *reference_axis = nullptr);
         geometry_msgs::msg::PoseStamped applyKalmanFilterToPose(const geometry_msgs::msg::PoseStamped &raw_pose, const rclcpp::Time &stamp);
         void resetKalmanState(const Eigen::Vector3d &position, const Eigen::Vector3d &axis, double stamp_s);
         void kalmanPredictUpdate1D(double measurement, double dt, double process_noise, double measurement_noise,

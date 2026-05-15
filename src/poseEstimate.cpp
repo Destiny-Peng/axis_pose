@@ -35,6 +35,7 @@ namespace axispose
         this->declare_parameter("ceres_weight_2d", ceres_weight_2d_);
         this->declare_parameter("ceres_weight_pos", ceres_weight_pos_);
         this->declare_parameter("ceres_weight_3d_pos", ceres_weight_3d_pos_);
+        this->declare_parameter("x_plane_d", x_plane_d_);
 
         // statistics parameters
         this->declare_parameter("statistics_directory_path", statistics_directory_path_);
@@ -68,6 +69,7 @@ namespace axispose
         ceres_weight_2d_ = this->get_parameter("ceres_weight_2d").as_double();
         ceres_weight_pos_ = this->get_parameter("ceres_weight_pos").as_double();
         ceres_weight_3d_pos_ = this->get_parameter("ceres_weight_3d_pos").as_double();
+        x_plane_d_ = this->get_parameter("x_plane_d").as_double();
         kalman_enabled_ = this->get_parameter("kalman_enabled").as_bool();
         kalman_position_process_noise_ = this->get_parameter("kalman_position_process_noise").as_double();
         kalman_position_measurement_noise_ = this->get_parameter("kalman_position_measurement_noise").as_double();
@@ -91,6 +93,7 @@ namespace axispose
         }
         RCLCPP_INFO(this->get_logger(), "Ceres params: iter=%d points=%d w2d=%.3f wpos=%.3f w3d=%.3f",
                     ceres_max_iterations_, ceres_max_points_, ceres_weight_2d_, ceres_weight_pos_, ceres_weight_3d_pos_);
+        RCLCPP_INFO(this->get_logger(), "Ceres x-plane parameter: x_plane_d=%.6f", x_plane_d_);
 
         rclcpp::QoS qos(rclcpp::KeepLast(5));
         // message_filters subscribers
@@ -108,7 +111,6 @@ namespace axispose
             depth_camera_info_topic, qos,
             std::bind(&PoseEstimateBase::cameraInfoDepthCallback, this, std::placeholders::_1));
 
-        pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/shaft/pose", 10);
         tracked_pose_pub_ = this->create_publisher<axispose_msgs::msg::TrackedPoseArray>(tracked_pose_topic, 10);
         debug_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/shaft/debug_cloud", 1);
 
@@ -358,6 +360,8 @@ namespace axispose
         if (state.axis_history_valid && axis_meas.dot(state.axis_history) < 0.0)
         {
             axis_meas = -axis_meas;
+            RCLCPP_INFO(this->get_logger(), "Track %u: axis sign flipped to match history (stamp=%.6f)", track_id, stamp_s);
+            RCLCPP_INFO(this->get_logger(), "  raw_axis=(%.3f,%.3f,%.3f) corrected=(%.3f,%.3f,%.3f)", raw_axis.x(), raw_axis.y(), raw_axis.z(), axis_meas.x(), axis_meas.y(), axis_meas.z());
         }
 
         for (int i = 0; i < 3; ++i)
@@ -368,6 +372,15 @@ namespace axispose
                                   state.axis_x[i], state.axis_v[i], state.axis_P[i]);
         }
         state.last_stamp_s = stamp_s;
+
+        // Diagnostic: log large instantaneous position corrections from the Kalman update.
+        const double pos_shift = (state.pos_x - raw_pos).norm();
+        constexpr double kPosJumpThreshold = 0.05; // meters
+        if (pos_shift > kPosJumpThreshold)
+        {
+            RCLCPP_INFO(this->get_logger(), "Track %u: large pos jump after Kalman (shift=%.4fm) stamp=%.6f", track_id, pos_shift, stamp_s);
+            RCLCPP_INFO(this->get_logger(), "  raw_pos=(%.3f,%.3f,%.3f) kalman_pos=(%.3f,%.3f,%.3f)", raw_pos.x(), raw_pos.y(), raw_pos.z(), state.pos_x.x(), state.pos_x.y(), state.pos_x.z());
+        }
 
         Eigen::Vector3d filtered_axis = state.axis_x;
         const double axis_norm = filtered_axis.norm();
@@ -534,10 +547,8 @@ namespace axispose
             pose_msg.header.frame_id = have_intrinsics_color_ ? color_frame_id_ : frame_id_;
             pose_msg = applyKalmanFilterToTrackedPose(tracked_object.track_id, pose_msg, depth_msg->header.stamp);
 
-            if (tracked_object.status == axispose_msgs::msg::TrackedObject::STATUS_CONFIRMED)
-            {
-                pose_pub_->publish(pose_msg);
-            }
+            // Previously published a bare PoseStamped per confirmed object on /shaft/pose.
+            // Removed: publishing raw PoseStamped is ambiguous in multi-target scenarios.
 
             tracked_pose_array_msg.poses.push_back(
                 buildTrackedPoseMessage(tracked_object.track_id, tracked_object, pose_msg, valid_cloud->size()));
@@ -612,6 +623,35 @@ namespace axispose
             }
             axis_history_ = out;
             axis_history_valid_ = true;
+        }
+
+        return out;
+    }
+
+    Eigen::Vector3d PoseEstimateBase::stabilizeAxisNoHistory(const Eigen::Vector3d &axis, const Eigen::Vector3d *reference_axis)
+    {
+        Eigen::Vector3d out = axis.normalized();
+        if (!std::isfinite(out.x()) || !std::isfinite(out.y()) || !std::isfinite(out.z()))
+        {
+            return Eigen::Vector3d::UnitX();
+        }
+
+        // Prefer external reference when available (e.g., PCA axis from current frame).
+        if (reference_axis)
+        {
+            Eigen::Vector3d ref = reference_axis->normalized();
+            if (std::isfinite(ref.x()) && std::isfinite(ref.y()) && std::isfinite(ref.z()) && out.dot(ref) < 0.0)
+            {
+                out = -out;
+            }
+        }
+        else
+        {
+            // No temporal history: keep forward-facing preference in camera frame.
+            if (out.x() < 0.0)
+            {
+                out = -out;
+            }
         }
 
         return out;
@@ -809,7 +849,7 @@ namespace axispose
         Eigen::Vector3f axis_y = eig_vecs.col(1).normalized();
         Eigen::Vector3f axis_z = eig_vecs.col(0).normalized();
         (void)axis_z;
-        axis_x = stabilizeAxisDirection(axis_x.cast<double>(), nullptr).cast<float>();
+        axis_x = stabilizeAxisNoHistory(axis_x.cast<double>(), nullptr).cast<float>();
         // Eigen::Vector3f axis_x_ = coefficients->values[3] * Eigen::Vector3f::UnitX() +
         //                           coefficients->values[4] * Eigen::Vector3f::UnitY() +
         //                           coefficients->values[5] * Eigen::Vector3f::UnitZ();
@@ -881,7 +921,7 @@ namespace axispose
                                  coefficients.values[4] * Eigen::Vector3f::UnitY() +
                                  coefficients.values[5] * Eigen::Vector3f::UnitZ();
         axis_x.normalize();
-        axis_x = stabilizeAxisDirection(axis_x.cast<double>(), nullptr).cast<float>();
+        axis_x = stabilizeAxisNoHistory(axis_x.cast<double>(), nullptr).cast<float>();
         Eigen::Vector3f axis_y = axis_x.unitOrthogonal();
         Eigen::Vector3f axis_z = axis_x.cross(axis_y).normalized();
         Eigen::Matrix3f R;
@@ -943,7 +983,7 @@ namespace axispose
             out_axis = pca_axis;
         }
         Eigen::Vector3d pca_axis_d = pca_axis.cast<double>();
-        out_axis = stabilizeAxisDirection(out_axis.cast<double>(), &pca_axis_d).cast<float>();
+        out_axis = stabilizeAxisNoHistory(out_axis.cast<double>(), &pca_axis_d).cast<float>();
 
         pose.pose.position.x = out_point.x();
         pose.pose.position.y = out_point.y();
@@ -991,7 +1031,7 @@ namespace axispose
             RCLCPP_WARN(this->get_logger(), "Ceres skipped: invalid PCA init, fallback PCA pose");
             return computePoseFromCloud(cloud, stamp);
         }
-        Eigen::Vector3d d = stabilizeAxisDirection(pca_axis, nullptr).normalized();
+        Eigen::Vector3d d = stabilizeAxisNoHistory(pca_axis, nullptr).normalized();
         Eigen::Vector3d p = centroid4.head<3>().cast<double>();
         Eigen::Vector3d m = p.cross(d);
 
@@ -1048,30 +1088,33 @@ namespace axispose
         }
 
         // Disambiguate line direction sign using current-frame PCA + temporal history.
-        d = stabilizeAxisDirection(d, &pca_axis).normalized();
+        d = stabilizeAxisNoHistory(d, &pca_axis).normalized();
 
-        // Recover line point from optimized Plucker (d, m), then anchor near cloud centroid.
+        // Recover line point from optimized Plucker (d, m), then intersect with x = d plane.
         const double dn2 = d.squaredNorm();
-        Eigen::Vector3d optimized_point = p;
+        Eigen::Vector3d line_point = p;
         if (dn2 > 1e-12)
         {
-            optimized_point = d.cross(m) / dn2;
+            line_point = d.cross(m) / dn2;
             const Eigen::Vector3d centroid = centroid4.head<3>().cast<double>();
-            optimized_point = optimized_point + d * d.dot(centroid - optimized_point);
-
-            // Keep motion bounded against initial point to avoid occasional jumps.
-            const double max_shift = 0.20; // meters
-            Eigen::Vector3d delta = optimized_point - p;
-            const double norm_delta = delta.norm();
-            if (norm_delta > max_shift)
-            {
-                optimized_point = p + delta * (max_shift / norm_delta);
-            }
+            line_point = line_point + d * d.dot(centroid - line_point);
         }
 
-        pose.pose.position.x = optimized_point.x();
-        pose.pose.position.y = optimized_point.y();
-        pose.pose.position.z = optimized_point.z();
+        Eigen::Vector3d intersection_point = line_point;
+        const double dx = d.x();
+        if (std::isfinite(dx) && std::abs(dx) > 1e-9)
+        {
+            const double t = (x_plane_d_ - line_point.x()) / dx;
+            intersection_point = line_point + d * t;
+        }
+        else
+        {
+            RCLCPP_WARN(this->get_logger(), "Ceres line is nearly parallel to x-plane, fallback to line anchor point");
+        }
+
+        pose.pose.position.x = intersection_point.x();
+        pose.pose.position.y = intersection_point.y();
+        pose.pose.position.z = intersection_point.z();
 
         // Keep convention consistent with PCA path: line direction is local X axis.
         Eigen::Vector3d axis_x = d.normalized();

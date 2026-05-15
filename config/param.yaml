@@ -45,6 +45,7 @@
     kalman_max_dt: 0.2
     ceres_max_iterations: 100
     ceres_max_points: 300
-    ceres_weight_2d: 3.0
-    ceres_weight_pos: 3.0
+    ceres_weight_2d: 5.0
+    ceres_weight_pos: 20.0
     ceres_weight_3d_pos: 1.0
+    x_plane_d: 6.0

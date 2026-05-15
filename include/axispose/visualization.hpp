@@ -5,6 +5,7 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 #include <axispose_msgs/msg/tracked_object_array.hpp>
 #include <axispose_msgs/msg/tracked_pose_array.hpp>
 #include <message_filters/subscriber.h>
@@ -43,6 +44,7 @@ namespace axispose
 
         // publisher for visualization image
         rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr vis_pub_;
+        rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
 
         // image saving
         bool save_annotated_ = false;
@@ -62,9 +64,12 @@ namespace axispose
                           const TrackedObjectArray::ConstSharedPtr object_array_msg);
 
         // parameters
-        double axis_length_ = 0.25; // meters for visualized axis half-length
+        double axis_length_ = 1.5; // meters for visualized axis half-length
+        // multiplier applied to axis_length_ when drawing RViz markers
+        double marker_length_scale_ = 1.0;
         std::string pose_array_topic_{"/shaft/tracked_poses"};
         std::string object_array_topic_{"/yolo/tracked_objects"};
+        std::string marker_topic_{"/shaft/vis_markers"};
     };
 
 } // namespace axispose

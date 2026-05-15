@@ -18,6 +18,9 @@
 #include <array>
 #include <unordered_map>
 
+#include <visualization_msgs/msg/marker.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
+
 namespace axispose
 {
 
@@ -127,6 +130,8 @@ namespace axispose
         this->declare_parameter("color_image_topic", std::string("/camera/rgb/image_raw"));
         this->declare_parameter("pose_topic", std::string("/shaft/pose"));
         this->declare_parameter("tracked_pose_topic", std::string("/shaft/tracked_poses"));
+        this->declare_parameter("marker_topic", std::string("/shaft/vis_markers"));
+        this->declare_parameter("marker_length_scale", 1.0);
         this->declare_parameter("tracked_object_topic", std::string("/yolo/tracked_objects"));
         this->declare_parameter("camera_info_topic", std::string("/camera/color/camera_info"));
         this->declare_parameter("depth_camera_info_topic", std::string("/camera/depth/camera_info"));
@@ -140,12 +145,13 @@ namespace axispose
 
         std::string mask_topic = this->get_parameter("mask_topic").as_string();
         std::string color_image_topic = this->get_parameter("color_image_topic").as_string();
-        std::string pose_topic = this->get_parameter("pose_topic").as_string();
         pose_array_topic_ = this->get_parameter("tracked_pose_topic").as_string();
+        marker_topic_ = this->get_parameter("marker_topic").as_string();
         object_array_topic_ = this->get_parameter("tracked_object_topic").as_string();
         std::string caminfo_topic = this->get_parameter("camera_info_topic").as_string();
         std::string depth_caminfo_topic = this->get_parameter("depth_camera_info_topic").as_string();
         axis_length_ = this->get_parameter("axis_length").as_double();
+        marker_length_scale_ = this->get_parameter("marker_length_scale").as_double();
         save_annotated_ = this->get_parameter("save_visualization").as_bool();
         save_dir_ = this->get_parameter("save_dir").as_string();
         std::string stats_dir = this->get_parameter("statistics_directory_path").as_string();
@@ -255,8 +261,10 @@ namespace axispose
         sync_->registerCallback(&Visualization::syncCallback, this);
 
         vis_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/shaft/vis_image", 1);
+        marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(marker_topic_, 1);
 
-        RCLCPP_INFO(this->get_logger(), "Visualization node started. Subscribed to %s %s %s %s", color_image_topic.c_str(), pose_array_topic_.c_str(), caminfo_topic.c_str(), object_array_topic_.c_str());
+        RCLCPP_INFO(this->get_logger(), "Visualization node started. Subscribed to %s %s %s %s and publishing markers to %s",
+                    color_image_topic.c_str(), pose_array_topic_.c_str(), caminfo_topic.c_str(), object_array_topic_.c_str(), marker_topic_.c_str());
     }
 
     static cv::Mat cameraMatrixFromInfo(const sensor_msgs::msg::CameraInfo &cam)
@@ -343,12 +351,20 @@ namespace axispose
         }
 
         cv::Mat vis = rgb_cv.clone();
+        visualization_msgs::msg::MarkerArray marker_array_msg;
         std::unordered_map<uint32_t, const axispose_msgs::msg::TrackedPose *> lookup;
         lookup.reserve(pose_array_msg->poses.size());
         for (const auto &pose_item : pose_array_msg->poses)
         {
             lookup[pose_item.track_id] = &pose_item;
         }
+
+        visualization_msgs::msg::Marker clear_marker;
+        clear_marker.header = pose_array_msg->header;
+        clear_marker.ns = "tracked_poses";
+        clear_marker.id = 0;
+        clear_marker.action = visualization_msgs::msg::Marker::DELETEALL;
+        marker_array_msg.markers.push_back(clear_marker);
 
         auto trackColor = [](uint32_t track_id) -> cv::Scalar
         {
@@ -413,9 +429,51 @@ namespace axispose
                                    pose_msg.orientation.z);
             Eigen::Vector3d axis_dir_e = q_e.toRotationMatrix() * Eigen::Vector3d(1.0, 0.0, 0.0);
             geometry_msgs::msg::Point axis_end;
-            axis_end.x = center.x + axis_dir_e.x() * axis_length_;
-            axis_end.y = center.y + axis_dir_e.y() * axis_length_;
-            axis_end.z = center.z + axis_dir_e.z() * axis_length_;
+            // marker length is axis_length_ scaled by marker_length_scale_
+            const double draw_length = axis_length_ * marker_length_scale_;
+            axis_end.x = center.x + axis_dir_e.x() * draw_length;
+            axis_end.y = center.y + axis_dir_e.y() * draw_length;
+            axis_end.z = center.z + axis_dir_e.z() * draw_length;
+
+            const std::string ns = "tracked_pose_" + std::to_string(object_item.track_id);
+
+            visualization_msgs::msg::Marker arrow_marker;
+            arrow_marker.header = pose_array_msg->header;
+            arrow_marker.ns = ns;
+            arrow_marker.id = 0;
+            arrow_marker.type = visualization_msgs::msg::Marker::ARROW;
+            arrow_marker.action = visualization_msgs::msg::Marker::ADD;
+            arrow_marker.pose.orientation.w = 1.0;
+            // Increased sizes for better visibility in RViz
+            arrow_marker.scale.x = 0.04;
+            arrow_marker.scale.y = 0.08;
+            arrow_marker.scale.z = 0.12;
+            arrow_marker.color.r = static_cast<float>(color[2]) / 255.0f;
+            arrow_marker.color.g = static_cast<float>(color[1]) / 255.0f;
+            arrow_marker.color.b = static_cast<float>(color[0]) / 255.0f;
+            arrow_marker.color.a = 0.95f;
+            arrow_marker.points.push_back(center);
+            arrow_marker.points.push_back(axis_end);
+            marker_array_msg.markers.push_back(arrow_marker);
+
+            visualization_msgs::msg::Marker text_marker;
+            text_marker.header = pose_array_msg->header;
+            text_marker.ns = ns;
+            text_marker.id = 1;
+            text_marker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+            text_marker.action = visualization_msgs::msg::Marker::ADD;
+            text_marker.pose.position.x = center.x;
+            text_marker.pose.position.y = center.y;
+            text_marker.pose.position.z = center.z + 0.15;
+            text_marker.pose.orientation.w = 1.0;
+            // Larger text for readability
+            text_marker.scale.z = 0.12;
+            text_marker.color.r = 1.0f;
+            text_marker.color.g = 1.0f;
+            text_marker.color.b = 1.0f;
+            text_marker.color.a = 1.0f;
+            text_marker.text = "ID:" + std::to_string(object_item.track_id);
+            marker_array_msg.markers.push_back(text_marker);
 
             cv::Point2f pc, pe;
             const bool okc = projectPoint(center, camera_matrix, pc);
@@ -538,6 +596,10 @@ namespace axispose
         out_msg->header.stamp = rgb_msg->header.stamp;
         out_msg->header.frame_id = rgb_msg->header.frame_id;
         vis_pub_->publish(*out_msg);
+        if (marker_pub_)
+        {
+            marker_pub_->publish(marker_array_msg);
+        }
 
         // optionally save annotated image to disk
         if (save_annotated_)
