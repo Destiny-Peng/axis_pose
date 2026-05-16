@@ -20,6 +20,7 @@ namespace axispose
         this->declare_parameter("depth_image_topic", std::string("/camera/depth/image_raw"));
         this->declare_parameter("mask_topic", std::string("/yolo/mask"));
         this->declare_parameter("tracked_objects_topic", std::string("/yolo/tracked_objects"));
+        this->declare_parameter("processed_tracked_objects_topic", std::string("/yolo/tracked_objects_processed"));
         this->declare_parameter("tracked_pose_topic", std::string("/shaft/tracked_poses"));
         this->declare_parameter("color_camera_info_topic", std::string("/camera/color/camera_info"));
         this->declare_parameter("depth_camera_info_topic", std::string("/camera/depth/camera_info"));
@@ -44,6 +45,7 @@ namespace axispose
         this->declare_parameter("debug_publish_only_on_anomaly", debug_publish_only_on_anomaly_);
         this->declare_parameter("debug_publish_max_points", debug_publish_max_points_);
         this->declare_parameter("debug_publish_raw_pointclouds", debug_publish_raw_pointclouds_);
+        this->declare_parameter("debug_publish_processed_mask", debug_publish_processed_mask_);
 
         // statistics parameters
         this->declare_parameter("statistics_directory_path", statistics_directory_path_);
@@ -67,6 +69,7 @@ namespace axispose
         std::string depth_image_topic = this->get_parameter("depth_image_topic").as_string();
         std::string mask_topic = this->get_parameter("mask_topic").as_string();
         std::string tracked_objects_topic = this->get_parameter("tracked_objects_topic").as_string();
+        std::string processed_tracked_objects_topic = this->get_parameter("processed_tracked_objects_topic").as_string();
         std::string tracked_pose_topic = this->get_parameter("tracked_pose_topic").as_string();
         std::string color_camera_info_topic = this->get_parameter("color_camera_info_topic").as_string();
         std::string depth_camera_info_topic = this->get_parameter("depth_camera_info_topic").as_string();
@@ -93,6 +96,7 @@ namespace axispose
         debug_publish_only_on_anomaly_ = this->get_parameter("debug_publish_only_on_anomaly").as_bool();
         debug_publish_max_points_ = this->get_parameter("debug_publish_max_points").as_int();
         debug_publish_raw_pointclouds_ = this->get_parameter("debug_publish_raw_pointclouds").as_bool();
+        debug_publish_processed_mask_ = this->get_parameter("debug_publish_processed_mask").as_bool();
         kalman_enabled_ = this->get_parameter("kalman_enabled").as_bool();
         kalman_position_process_noise_ = this->get_parameter("kalman_position_process_noise").as_double();
         kalman_position_measurement_noise_ = this->get_parameter("kalman_position_measurement_noise").as_double();
@@ -108,8 +112,8 @@ namespace axispose
         kalman_reset_on_large_jump_ = this->get_parameter("kalman_reset_on_large_jump").as_bool();
         kalman_reset_threshold_ = this->get_parameter("kalman_reset_threshold").as_double();
 
-        RCLCPP_INFO(this->get_logger(), "PoseEstimate node starting. Depth: %s Mask: %s TrackedObjects: %s",
-                    depth_image_topic.c_str(), mask_topic.c_str(), tracked_objects_topic.c_str());
+        RCLCPP_INFO(this->get_logger(), "PoseEstimate node starting. Depth: %s Mask: %s TrackedObjects: %s ProcessedTrackedObjects: %s",
+                    depth_image_topic.c_str(), mask_topic.c_str(), tracked_objects_topic.c_str(), processed_tracked_objects_topic.c_str());
         if (kalman_enabled_)
         {
             RCLCPP_INFO(this->get_logger(), "Pose Kalman enabled: q_pos=%.6f r_pos=%.6f q_axis=%.6f r_axis=%.6f dt=[%.4f, %.4f]",
@@ -141,8 +145,10 @@ namespace axispose
             std::bind(&PoseEstimateBase::cameraInfoDepthCallback, this, std::placeholders::_1));
 
         tracked_pose_pub_ = this->create_publisher<axispose_msgs::msg::TrackedPoseArray>(tracked_pose_topic, 10);
+        processed_tracked_objects_pub_ = this->create_publisher<axispose_msgs::msg::TrackedObjectArray>(processed_tracked_objects_topic, 10);
         debug_pointcloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/shaft/debug_pointclouds", qos);
         debug_raw_pointcloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/shaft/debug_raw_pointclouds", qos);
+        debug_processed_mask_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/yolo/mask_processed", qos);
 
         // initialize debug manager (controls runtime debug flags via parameter `debug_flags`)
         debug_ = std::make_shared<DebugManager>(this);
@@ -150,6 +156,7 @@ namespace axispose
         // initialize helpers
         pc_processor_ = std::make_unique<PointCloudProcessor>();
         depth_aligner_ = std::make_unique<DepthAligner>();
+        jsd_preprocessor_ = std::make_unique<JointSemanticDepthPreprocessor>();
 
         // initialize benchmark/metrics logger (records per-frame metrics to CSV)
         try
@@ -478,8 +485,6 @@ namespace axispose
         {
             kalmanPredictUpdate1D(raw_pos[i], dt, pos_process_noise, kalman_position_measurement_noise_,
                                   state.pos_x[i], state.pos_v[i], state.pos_P[i]);
-            kalmanPredictUpdate1D(axis_meas[i], dt, kalman_axis_process_noise_, kalman_axis_measurement_noise_,
-                                  state.axis_x[i], state.axis_v[i], state.axis_P[i]);
         }
         state.last_stamp_s = stamp_s;
 
@@ -492,47 +497,12 @@ namespace axispose
             RCLCPP_INFO(this->get_logger(), "  raw_pos=(%.3f,%.3f,%.3f) kalman_pos=(%.3f,%.3f,%.3f)", raw_pos.x(), raw_pos.y(), raw_pos.z(), state.pos_x.x(), state.pos_x.y(), state.pos_x.z());
         }
 
-        Eigen::Vector3d filtered_axis = state.axis_x;
-        const double axis_norm = filtered_axis.norm();
-        if (axis_norm > 1e-9)
-        {
-            filtered_axis /= axis_norm;
-        }
-        else
-        {
-            filtered_axis = axis_meas;
-        }
-
-        if (state.axis_history_valid && filtered_axis.dot(state.axis_history) < 0.0)
-        {
-            filtered_axis = -filtered_axis;
-        }
-        state.axis_history = (0.8 * state.axis_history + 0.2 * filtered_axis).normalized();
-        state.axis_history_valid = true;
-
-        Eigen::Vector3d up = Eigen::Vector3d::UnitY();
-        if (std::abs(filtered_axis.dot(up)) > 0.99)
-        {
-            up = Eigen::Vector3d::UnitZ();
-        }
-        Eigen::Vector3d axis_y = (up - up.dot(filtered_axis) * filtered_axis).normalized();
-        Eigen::Vector3d axis_z = filtered_axis.cross(axis_y).normalized();
-
-        Eigen::Matrix3d R;
-        R.col(0) = filtered_axis;
-        R.col(1) = axis_y;
-        R.col(2) = axis_z;
-        Eigen::Quaterniond q_filtered(R);
-        q_filtered.normalize();
-
         geometry_msgs::msg::PoseStamped out = raw_pose;
         out.pose.position.x = state.pos_x.x();
         out.pose.position.y = state.pos_x.y();
         out.pose.position.z = state.pos_x.z();
-        out.pose.orientation.x = q_filtered.x();
-        out.pose.orientation.y = q_filtered.y();
-        out.pose.orientation.z = q_filtered.z();
-        out.pose.orientation.w = q_filtered.w();
+        // Preserve the raw orientation from the pose estimator.
+        out.pose.orientation = raw_pose.pose.orientation;
         return out;
     }
 
@@ -566,6 +536,9 @@ namespace axispose
         tracked_pose_array_msg.header = depth_msg->header;
         tracked_pose_array_msg.header.frame_id = have_intrinsics_color_ ? color_frame_id_ : frame_id_;
         tracked_pose_array_msg.poses.reserve(tracked_objects_msg->objects.size());
+        axispose_msgs::msg::TrackedObjectArray processed_tracked_objects_msg;
+        processed_tracked_objects_msg.header = tracked_objects_msg->header;
+        processed_tracked_objects_msg.objects.reserve(tracked_objects_msg->objects.size());
 
         for (const auto &tracked_object : tracked_objects_msg->objects)
         {
@@ -577,7 +550,16 @@ namespace axispose
             cv::Mat mask_cv;
             try
             {
-                mask_cv = cv::Mat(tracked_object.mask.height, tracked_object.mask.width, CV_8U, const_cast<unsigned char *>(tracked_object.mask.data.data())).clone();
+                // tracked_object.mask now may be CV_32F (32FC1) confidence map
+                if (tracked_object.mask.encoding == "32FC1")
+                {
+                    mask_cv = cv::Mat(tracked_object.mask.height, tracked_object.mask.width, CV_32F, const_cast<unsigned char *>(tracked_object.mask.data.data())).clone();
+                }
+                else
+                {
+                    // fallback to mono8
+                    mask_cv = cv::Mat(tracked_object.mask.height, tracked_object.mask.width, CV_8U, const_cast<unsigned char *>(tracked_object.mask.data.data())).clone();
+                }
             }
             catch (const std::exception &e)
             {
@@ -600,13 +582,69 @@ namespace axispose
                 continue;
             }
 
-            if (mask_cv.size() != object_depth.size())
+            // Ensure mask is in binary CV_8U for copyTo; if it's float confidence, threshold first
+            cv::Mat mask_bin;
+            cv::Mat processed_mask_for_publish;
+            if (mask_cv.type() == CV_32F || mask_cv.type() == CV_32FC1)
             {
-                cv::resize(mask_cv, mask_cv, object_depth.size(), 0, 0, cv::INTER_NEAREST);
+                if (mask_cv.size() != object_depth.size())
+                {
+                    cv::Mat tmp;
+                    cv::resize(mask_cv, tmp, object_depth.size(), 0, 0, cv::INTER_LINEAR);
+                    mask_cv = tmp;
+                }
+                if (jsd_preprocessor_)
+                {
+                    // use depth-guided adaptive threshold and dilation
+                    try
+                    {
+                        mask_bin = jsd_preprocessor_->applyAdaptiveThreshold(mask_cv, object_depth);
+                        mask_bin = jsd_preprocessor_->dilateMaskAdaptive(mask_bin, object_depth, 3.0f, 0.5f);
+                        processed_mask_for_publish = mask_bin.clone();
+                        // Log and publish processed mask for debug/verification
+                        cv::Mat orig_bin;
+                        cv::threshold(mask_cv, orig_bin, 0.5, 255.0, cv::THRESH_BINARY);
+                        orig_bin.convertTo(orig_bin, CV_8U);
+                        const int orig_count = static_cast<int>(cv::countNonZero(orig_bin));
+                        const int proc_count = static_cast<int>(cv::countNonZero(mask_bin));
+                        // if (orig_count != proc_count)
+                        // {
+                        //     RCLCPP_INFO(this->get_logger(), "Track %u: mask pixels orig=%d proc=%d", tracked_object.track_id, orig_count, proc_count);
+                        // }
+                        if (debug_publish_processed_mask_ && debug_processed_mask_pub_)
+                        {
+                            sensor_msgs::msg::Image out_img = *cv_bridge::CvImage(depth_msg->header, "mono8", mask_bin).toImageMsg();
+                            debug_processed_mask_pub_->publish(out_img);
+                        }
+                    }
+                    catch (const std::exception &e)
+                    {
+                        RCLCPP_WARN(this->get_logger(), "Preprocessor failed: %s", e.what());
+                        cv::Mat tmpbin;
+                        cv::threshold(mask_cv, tmpbin, 0.5, 255.0, cv::THRESH_BINARY);
+                        tmpbin.convertTo(mask_bin, CV_8U);
+                        processed_mask_for_publish = mask_bin.clone();
+                    }
+                }
+                else
+                {
+                    cv::Mat tmpbin;
+                    cv::threshold(mask_cv, tmpbin, 0.5, 255.0, cv::THRESH_BINARY);
+                    tmpbin.convertTo(mask_bin, CV_8U);
+                    processed_mask_for_publish = mask_bin.clone();
+                }
+            }
+            else
+            {
+                if (mask_cv.size() != object_depth.size())
+                {
+                    cv::resize(mask_cv, mask_cv, object_depth.size(), 0, 0, cv::INTER_NEAREST);
+                }
+                mask_bin = mask_cv;
             }
 
             cv::Mat depth_filtered = cv::Mat::zeros(object_depth.size(), object_depth.type());
-            object_depth.copyTo(depth_filtered, mask_cv);
+            object_depth.copyTo(depth_filtered, mask_bin);
 
             auto organized = pc_processor_->depthMaskToPointCloud(depth_filtered, point_cloud_camera_matrix);
             if (!organized || organized->empty())
@@ -679,9 +717,9 @@ namespace axispose
             geometry_msgs::msg::PoseStamped pose_msg;
             if (benchmark_)
             {
-                auto tup = benchmark_->run(benchmarkLabel(), [this, &valid_cloud, &mask_cv, &depth_msg]()
+                auto tup = benchmark_->run(benchmarkLabel(), [this, &valid_cloud, &mask_cv, &mask_bin, &depth_msg]()
                                            {
-                    auto p = this->computePoseByAlgorithm(valid_cloud, mask_cv, depth_msg->header.stamp);
+                    auto p = this->computePoseByAlgorithm(valid_cloud, mask_bin, depth_msg->header.stamp);
                     return std::make_tuple(p, static_cast<size_t>(valid_cloud->size())); }, [](const std::tuple<geometry_msgs::msg::PoseStamped, size_t> &t) -> std::vector<std::string>
                                            {
                     const auto &pose = std::get<0>(t).pose;
@@ -701,7 +739,7 @@ namespace axispose
             }
             else
             {
-                pose_msg = computePoseByAlgorithm(valid_cloud, mask_cv, depth_msg->header.stamp);
+                pose_msg = computePoseByAlgorithm(valid_cloud, mask_bin, depth_msg->header.stamp);
             }
 
             pose_msg.header.stamp = depth_msg->header.stamp;
@@ -713,11 +751,22 @@ namespace axispose
 
             tracked_pose_array_msg.poses.push_back(
                 buildTrackedPoseMessage(tracked_object.track_id, tracked_object, pose_msg, valid_cloud->size()));
+
+            if (!processed_mask_for_publish.empty())
+            {
+                axispose_msgs::msg::TrackedObject processed_object = tracked_object;
+                processed_object.mask = *cv_bridge::CvImage(depth_msg->header, "mono8", processed_mask_for_publish).toImageMsg();
+                processed_tracked_objects_msg.objects.push_back(std::move(processed_object));
+            }
         }
 
         if (tracked_pose_pub_)
         {
             tracked_pose_pub_->publish(tracked_pose_array_msg);
+        }
+        if (processed_tracked_objects_pub_)
+        {
+            processed_tracked_objects_pub_->publish(processed_tracked_objects_msg);
         }
     }
 

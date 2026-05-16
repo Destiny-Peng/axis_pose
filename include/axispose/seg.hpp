@@ -30,6 +30,8 @@ namespace axispose
             cv::Point2d center{0.0, 0.0};
             double area{0.0};
             float confidence{0.0f};
+            // NOTE: mask now stores per-pixel float confidence in CV_32F (0.0..1.0).
+            // Downstream code should treat this as a confidence map, not a binary mask.
             cv::Mat mask;
         };
 
@@ -37,6 +39,8 @@ namespace axispose
         {
             uint32_t track_id{0};
             TrackCandidate candidate;
+            cv::Point2d last_center{0.0, 0.0};
+            cv::Point2d center_velocity{0.0, 0.0};
             uint32_t age{0};
             uint32_t confirm_count{0};
             uint32_t lost_frames{0};

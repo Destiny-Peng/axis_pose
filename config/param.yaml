@@ -24,6 +24,7 @@
     mask_topic: /yolo/mask
     tracked_object_topic: /yolo/tracked_objects
     tracked_objects_topic: /yolo/tracked_objects
+    processed_tracked_object_topic: /yolo/tracked_objects_processed
     tracked_pose_topic: /shaft/tracked_poses
     tracking_enabled: true
     lost_grace_frames: 15
@@ -35,7 +36,7 @@
     debug_flags: ["debug_cloud"]
     save_visualization: false
     save_every_n: 1
-    kalman_enabled: true
+    kalman_enabled: false
     kalman_position_process_noise: 0.05
     kalman_position_measurement_noise: 0.02
     kalman_axis_process_noise: 0.01

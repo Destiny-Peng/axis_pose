@@ -132,7 +132,7 @@ namespace axispose
         this->declare_parameter("tracked_pose_topic", std::string("/shaft/tracked_poses"));
         this->declare_parameter("marker_topic", std::string("/shaft/vis_markers"));
         this->declare_parameter("marker_length_scale", 1.0);
-        this->declare_parameter("tracked_object_topic", std::string("/yolo/tracked_objects"));
+        this->declare_parameter("processed_tracked_object_topic", std::string("/yolo/tracked_objects_processed"));
         this->declare_parameter("camera_info_topic", std::string("/camera/color/camera_info"));
         this->declare_parameter("depth_camera_info_topic", std::string("/camera/depth/camera_info"));
         this->declare_parameter("axis_length", axis_length_);
@@ -147,7 +147,7 @@ namespace axispose
         std::string color_image_topic = this->get_parameter("color_image_topic").as_string();
         pose_array_topic_ = this->get_parameter("tracked_pose_topic").as_string();
         marker_topic_ = this->get_parameter("marker_topic").as_string();
-        object_array_topic_ = this->get_parameter("tracked_object_topic").as_string();
+        object_array_topic_ = this->get_parameter("processed_tracked_object_topic").as_string();
         std::string caminfo_topic = this->get_parameter("camera_info_topic").as_string();
         std::string depth_caminfo_topic = this->get_parameter("depth_camera_info_topic").as_string();
         axis_length_ = this->get_parameter("axis_length").as_double();
@@ -391,8 +391,21 @@ namespace axispose
             cv::Mat mask_cv;
             try
             {
-                auto mask_ptr = cv_bridge::toCvCopy(object_item.mask, "mono8");
-                mask_cv = mask_ptr->image.clone();
+                // try float confidence map first
+                try
+                {
+                    auto mask_ptr_f = cv_bridge::toCvCopy(object_item.mask, "32FC1");
+                    cv::Mat conf = mask_ptr_f->image.clone();
+                    cv::Mat tmpbin;
+                    cv::threshold(conf, tmpbin, 0.5, 255.0, cv::THRESH_BINARY);
+                    tmpbin.convertTo(mask_cv, CV_8U);
+                }
+                catch (const cv_bridge::Exception &e2)
+                {
+                    // fallback to mono8
+                    auto mask_ptr = cv_bridge::toCvCopy(object_item.mask, "mono8");
+                    mask_cv = mask_ptr->image.clone();
+                }
             }
             catch (const cv_bridge::Exception &e)
             {

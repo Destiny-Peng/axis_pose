@@ -36,6 +36,7 @@
 #include "axispose/depth_aligner.hpp"
 #include "axispose/gaussian_map_solver.hpp"
 #include "axispose/ceres_joint_optimizer.hpp"
+#include "axispose/joint_semantic_depth_preprocessor.hpp"
 
 #include <memory>
 #include <atomic>
@@ -90,6 +91,7 @@ namespace axispose
 
         // Publishers
         rclcpp::Publisher<axispose_msgs::msg::TrackedPoseArray>::SharedPtr tracked_pose_pub_;
+        rclcpp::Publisher<axispose_msgs::msg::TrackedObjectArray>::SharedPtr processed_tracked_objects_pub_;
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_cloud_pub_;
         // Debug: per-object published pointclouds for diagnosis (no track id included)
         bool debug_publish_pointclouds_{false};
@@ -99,6 +101,9 @@ namespace axispose
         // Debug: raw mask-only pointclouds before denoise / clustering.
         bool debug_publish_raw_pointclouds_{false};
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_raw_pointcloud_pub_;
+        // Debug: publish processed binary mask for visual verification
+        bool debug_publish_processed_mask_{false};
+        rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr debug_processed_mask_pub_;
 
         // Intrinsics (stored as OpenCV camera matrices for readability and consistency).
         std::atomic<bool> have_intrinsics_depth_{false};
@@ -145,6 +150,7 @@ namespace axispose
         // Helpers (extracted)
         std::unique_ptr<PointCloudProcessor> pc_processor_;
         std::unique_ptr<DepthAligner> depth_aligner_;
+        std::unique_ptr<JointSemanticDepthPreprocessor> jsd_preprocessor_;
 
         // Callbacks
         void cameraInfoDepthCallback(const CameraInfo::SharedPtr msg);

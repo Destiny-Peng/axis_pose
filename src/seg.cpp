@@ -355,7 +355,22 @@ namespace axispose
         msg.bbox.do_rectify = false;
         if (!candidate.mask.empty())
         {
-            msg.mask = *cv_bridge::CvImage(header, "mono8", candidate.mask).toImageMsg();
+            cv::Mat mask_to_publish;
+            if (candidate.mask.type() == CV_32F || candidate.mask.type() == CV_32FC1)
+            {
+                mask_to_publish = candidate.mask;
+            }
+            else if (candidate.mask.type() == CV_8U)
+            {
+                // convert binary to float
+                candidate.mask.convertTo(mask_to_publish, CV_32F, 1.0 / 255.0);
+            }
+            else
+            {
+                // fallback: convert to float
+                candidate.mask.convertTo(mask_to_publish, CV_32F);
+            }
+            msg.mask = *cv_bridge::CvImage(header, "32FC1", mask_to_publish).toImageMsg();
         }
         else
         {
@@ -363,7 +378,7 @@ namespace axispose
             empty_mask.header = header;
             empty_mask.height = 0;
             empty_mask.width = 0;
-            empty_mask.encoding = "mono8";
+            empty_mask.encoding = "32FC1";
             empty_mask.is_bigendian = false;
             empty_mask.step = 0;
             msg.mask = empty_mask;
@@ -410,27 +425,29 @@ namespace axispose
                     continue;
                 }
 
+                // Keep the float confidence map (CV_32F) aligned to the image and store it in candidate.mask
                 cv::Mat float_mask(result.masks[i].height, result.masks[i].width, CV_32FC1, result.masks[i].data.data());
                 cv::Mat resized_mask;
                 cv::resize(float_mask, resized_mask, cv::Size(w, h), 0, 0, cv::INTER_LINEAR);
 
-                cv::Mat bool_mask;
-                cv::threshold(resized_mask, bool_mask, 0.5, 255, cv::THRESH_BINARY);
-                bool_mask.convertTo(bool_mask, CV_8UC1);
-
-                if (src_x_offset + w > bool_mask.cols)
-                    w = bool_mask.cols - src_x_offset;
-                if (src_y_offset + h > bool_mask.rows)
-                    h = bool_mask.rows - src_y_offset;
+                if (src_x_offset + w > resized_mask.cols)
+                    w = resized_mask.cols - src_x_offset;
+                if (src_y_offset + h > resized_mask.rows)
+                    h = resized_mask.rows - src_y_offset;
                 if (w <= 0 || h <= 0)
                     continue;
 
                 const cv::Rect source_rect(src_x_offset, src_y_offset, w, h);
                 const cv::Rect target_rect(x1, y1, w, h);
-                cv::Mat candidate_mask = cv::Mat::zeros(image.rows, image.cols, CV_8UC1);
-                bool_mask(source_rect).copyTo(candidate_mask(target_rect));
+                cv::Mat candidate_mask = cv::Mat::zeros(image.rows, image.cols, CV_32FC1);
+                // copy float region into full-size float mask
+                resized_mask(source_rect).copyTo(candidate_mask(target_rect));
 
-                const double area = static_cast<double>(cv::countNonZero(candidate_mask));
+                // compute area as number of pixels whose confidence >= 0.5
+                cv::Mat tmp_bin;
+                cv::threshold(candidate_mask, tmp_bin, 0.5, 255.0, cv::THRESH_BINARY);
+                tmp_bin.convertTo(tmp_bin, CV_8UC1);
+                const double area = static_cast<double>(cv::countNonZero(tmp_bin));
                 if (area <= 0.0)
                     continue;
 
@@ -443,13 +460,25 @@ namespace axispose
                 candidate.mask = std::move(candidate_mask);
                 candidates.push_back(std::move(candidate));
             }
-
+            // build a visualization/emit mask (CV_8U) from float confidences
             cv::Mat output_mask = cv::Mat::zeros(image.rows, image.cols, CV_8UC1);
             for (const auto &candidate : candidates)
             {
-                if (!candidate.mask.empty())
+                if (candidate.mask.empty())
+                    continue;
+                cv::Mat bin;
+                if (candidate.mask.type() == CV_32F || candidate.mask.type() == CV_32FC1)
                 {
-                    candidate.mask.copyTo(output_mask, candidate.mask);
+                    cv::threshold(candidate.mask, bin, 0.5, 255.0, cv::THRESH_BINARY);
+                    bin.convertTo(bin, CV_8UC1);
+                }
+                else if (candidate.mask.type() == CV_8U)
+                {
+                    bin = candidate.mask;
+                }
+                if (!bin.empty())
+                {
+                    cv::bitwise_or(output_mask, bin, output_mask);
                 }
             }
 
@@ -512,10 +541,17 @@ namespace axispose
                     return track_lhs.lost_frames < track_rhs.lost_frames;
                 return lhs < rhs; });
 
+            auto predictedCenter = [&](const TrackState &track) -> cv::Point2d
+            {
+                return cv::Point2d(track.last_center.x + track.center_velocity.x,
+                                   track.last_center.y + track.center_velocity.y);
+            };
+
             auto scoreCandidate = [&](const TrackCandidate &candidate, const TrackState &track, double *out_iou, double *out_center_dist_norm) -> double
             {
                 const double iou = computeIoU(candidate.bbox, track.candidate.bbox);
-                const double center_dist_norm = computeNormalizedCenterDistance(candidate.center, track.candidate.center, image.size());
+                const cv::Point2d predicted_center = predictedCenter(track);
+                const double center_dist_norm = computeNormalizedCenterDistance(candidate.center, predicted_center, image.size());
                 if (out_iou)
                     *out_iou = iou;
                 if (out_center_dist_norm)
@@ -575,8 +611,12 @@ namespace axispose
                         double matched_center_dist_norm = std::numeric_limits<double>::infinity();
                         (void)scoreCandidate(matched_candidate, track, &matched_iou, &matched_center_dist_norm);
 
+                        const cv::Point2d previous_center = track.candidate.center;
                         track.candidate = matched_candidate;
                         track.candidate.index = matched_candidate.index;
+                        track.center_velocity = cv::Point2d(matched_candidate.center.x - previous_center.x,
+                                                            matched_candidate.center.y - previous_center.y);
+                        track.last_center = matched_candidate.center;
                         track.age += 1;
                         track.lost_frames = 0;
                         track.matched_this_frame = true;
@@ -609,10 +649,7 @@ namespace axispose
                 TrackState &track = track_it->second;
                 if (track.matched_this_frame)
                     continue;
-                if (track.confirmed)
-                {
-                    ++track.lost_frames;
-                }
+                ++track.lost_frames;
             }
 
             for (size_t i = 0; i < candidates.size(); ++i)
@@ -623,6 +660,8 @@ namespace axispose
                 TrackState new_track;
                 new_track.track_id = next_track_id_++;
                 new_track.candidate = candidates[i];
+                new_track.last_center = candidates[i].center;
+                new_track.center_velocity = cv::Point2d(0.0, 0.0);
                 new_track.age = 1;
                 new_track.confirm_count = 1;
                 new_track.lost_frames = 0;
@@ -637,7 +676,8 @@ namespace axispose
             for (const auto &entry : tracks_)
             {
                 const TrackState &track = entry.second;
-                if (!track.confirmed && !track.matched_this_frame)
+                const uint32_t tentative_grace_frames = static_cast<uint32_t>(std::max(1, reacquire_confirm_frames_));
+                if (!track.confirmed && track.lost_frames > tentative_grace_frames)
                 {
                     tracks_to_remove.push_back(entry.first);
                 }
@@ -675,6 +715,12 @@ namespace axispose
                 {
                     status = axispose_msgs::msg::TrackedObject::STATUS_TENTATIVE;
                     ++tentative_count;
+                }
+
+                // Only publish confirmed tracks downstream; tentative tracks stay internal until stable.
+                if (status != axispose_msgs::msg::TrackedObject::STATUS_CONFIRMED)
+                {
+                    continue;
                 }
 
                 tracked_objects_msg.objects.push_back(

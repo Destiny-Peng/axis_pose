@@ -103,6 +103,7 @@ add_library(PoseEstimate SHARED
   src/poseEstimate.cpp
   src/depth_aligner.cpp
   src/point_cloud_processor.cpp
+  src/joint_semantic_depth_preprocessor.cpp
   src/gaussian_map_solver.cpp
   src/ceres_joint_optimizer.cpp
 )
