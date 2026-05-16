@@ -13,6 +13,86 @@ using std::placeholders::_1;
 
 namespace axispose
 {
+    namespace
+    {
+        std::vector<int> solveHungarian(const std::vector<std::vector<double>> &cost_matrix)
+        {
+            const int n = static_cast<int>(cost_matrix.size());
+            if (n == 0)
+                return {};
+
+            const int m = static_cast<int>(cost_matrix.front().size());
+            std::vector<double> u(n + 1, 0.0), v(m + 1, 0.0);
+            std::vector<int> p(m + 1, 0), way(m + 1, 0);
+
+            for (int i = 1; i <= n; ++i)
+            {
+                p[0] = i;
+                int j0 = 0;
+                std::vector<double> minv(m + 1, std::numeric_limits<double>::infinity());
+                std::vector<bool> used(m + 1, false);
+
+                do
+                {
+                    used[j0] = true;
+                    const int i0 = p[j0];
+                    double delta = std::numeric_limits<double>::infinity();
+                    int j1 = 0;
+
+                    for (int j = 1; j <= m; ++j)
+                    {
+                        if (used[j])
+                            continue;
+
+                        const double cur = cost_matrix[i0 - 1][j - 1] - u[i0] - v[j];
+                        if (cur < minv[j])
+                        {
+                            minv[j] = cur;
+                            way[j] = j0;
+                        }
+                        if (minv[j] < delta)
+                        {
+                            delta = minv[j];
+                            j1 = j;
+                        }
+                    }
+
+                    for (int j = 0; j <= m; ++j)
+                    {
+                        if (used[j])
+                        {
+                            u[p[j]] += delta;
+                            v[j] -= delta;
+                        }
+                        else
+                        {
+                            minv[j] -= delta;
+                        }
+                    }
+
+                    j0 = j1;
+                } while (p[j0] != 0);
+
+                do
+                {
+                    const int j1 = way[j0];
+                    p[j0] = p[j1];
+                    j0 = j1;
+                } while (j0 != 0);
+            }
+
+            std::vector<int> assignment(n, -1);
+            for (int j = 1; j <= m; ++j)
+            {
+                if (p[j] != 0 && p[j] <= n)
+                {
+                    assignment[p[j] - 1] = j - 1;
+                }
+            }
+            return assignment;
+        }
+    } // namespace
+
     SegmentNode::SegmentNode(const rclcpp::NodeOptions &options)
         : rclcpp::Node("segment_node", options)
     {
@@ -25,6 +105,7 @@ namespace axispose
         this->declare_parameter<int>("reacquire_confirm_frames", 2);
         this->declare_parameter<double>("iou_keep_min", 0.15);
         this->declare_parameter<double>("center_dist_max_ratio", 0.14);
+        this->declare_parameter<double>("association_min_score", 0.35);
         this->declare_parameter<std::string>("debug_topic", "/yolo/seg_debug");
 
         const std::string engine_path = this->get_parameter("engine").as_string();
@@ -36,6 +117,7 @@ namespace axispose
         reacquire_confirm_frames_ = std::max(1, static_cast<int>(this->get_parameter("reacquire_confirm_frames").as_int()));
         iou_keep_min_ = std::clamp(this->get_parameter("iou_keep_min").as_double(), 0.0, 1.0);
         center_dist_max_ratio_ = std::max(0.0, this->get_parameter("center_dist_max_ratio").as_double());
+        association_min_score_ = std::clamp(this->get_parameter("association_min_score").as_double(), 0.0, 1.0);
         debug_topic_ = this->get_parameter("debug_topic").as_string();
 
         if (engine_path.empty())
@@ -58,12 +140,13 @@ namespace axispose
         }
 
         RCLCPP_INFO(this->get_logger(), "Segment node initialized. Engine: %s", engine_path.c_str());
-        RCLCPP_INFO(this->get_logger(), "Segment tracking: enabled=%d grace=%d confirm=%d iou_min=%.3f center_dist_ratio=%.3f debug_topic=%s tracked_object_topic=%s",
+        RCLCPP_INFO(this->get_logger(), "Segment tracking: enabled=%d grace=%d confirm=%d iou_min=%.3f center_dist_ratio=%.3f assoc_min_score=%.3f debug_topic=%s tracked_object_topic=%s",
                     tracking_enabled_ ? 1 : 0,
                     lost_grace_frames_,
                     reacquire_confirm_frames_,
                     iou_keep_min_,
                     center_dist_max_ratio_,
+                    association_min_score_,
                     debug_topic_.c_str(),
                     tracked_object_topic.c_str());
     }
@@ -429,7 +512,6 @@ namespace axispose
                     return track_lhs.lost_frames < track_rhs.lost_frames;
                 return lhs < rhs; });
 
-            std::vector<bool> candidate_used(candidates.size(), false);
             auto scoreCandidate = [&](const TrackCandidate &candidate, const TrackState &track, double *out_iou, double *out_center_dist_norm) -> double
             {
                 const double iou = computeIoU(candidate.bbox, track.candidate.bbox);
@@ -448,64 +530,88 @@ namespace axispose
                 return score;
             };
 
+            std::vector<bool> candidate_used(candidates.size(), false);
+            const double unmatched_penalty = 1.0 - association_min_score_;
+
+            if (!track_order.empty() && !candidates.empty())
+            {
+                const size_t row_count = track_order.size();
+                const size_t col_count = candidates.size();
+                const size_t matrix_size = std::max(row_count, col_count);
+                std::vector<std::vector<double>> cost_matrix(matrix_size, std::vector<double>(matrix_size, unmatched_penalty));
+
+                for (size_t row = 0; row < row_count; ++row)
+                {
+                    auto track_it = tracks_.find(track_order[row]);
+                    if (track_it == tracks_.end())
+                        continue;
+
+                    const TrackState &track = track_it->second;
+                    for (size_t col = 0; col < col_count; ++col)
+                    {
+                        double iou = 0.0;
+                        double center_dist_norm = std::numeric_limits<double>::infinity();
+                        const double score = scoreCandidate(candidates[col], track, &iou, &center_dist_norm);
+                        if (iou < iou_keep_min_ && center_dist_norm > center_dist_max_ratio_)
+                            continue;
+                        const double cost = 1.0 - std::clamp(score, 0.0, 1.0);
+                        cost_matrix[row][col] = cost;
+                    }
+                }
+
+                const std::vector<int> assignment = solveHungarian(cost_matrix);
+                for (size_t row = 0; row < row_count; ++row)
+                {
+                    auto track_it = tracks_.find(track_order[row]);
+                    if (track_it == tracks_.end())
+                        continue;
+
+                    TrackState &track = track_it->second;
+                    const int assigned_col = assignment[row];
+                    if (assigned_col >= 0 && static_cast<size_t>(assigned_col) < col_count && cost_matrix[row][assigned_col] + 1e-9 < unmatched_penalty)
+                    {
+                        const TrackCandidate &matched_candidate = candidates[assigned_col];
+                        double matched_iou = 0.0;
+                        double matched_center_dist_norm = std::numeric_limits<double>::infinity();
+                        (void)scoreCandidate(matched_candidate, track, &matched_iou, &matched_center_dist_norm);
+
+                        track.candidate = matched_candidate;
+                        track.candidate.index = matched_candidate.index;
+                        track.age += 1;
+                        track.lost_frames = 0;
+                        track.matched_this_frame = true;
+                        if (!track.confirmed)
+                        {
+                            ++track.confirm_count;
+                            if (track.confirm_count >= static_cast<uint32_t>(reacquire_confirm_frames_))
+                            {
+                                track.confirmed = true;
+                            }
+                        }
+                        candidate_used[assigned_col] = true;
+                        RCLCPP_DEBUG(this->get_logger(),
+                                     "track %u matched det %d iou=%.4f center_dist=%.4f cost=%.4f confirmed=%d age=%u",
+                                     track.track_id, assigned_col, matched_iou, matched_center_dist_norm, cost_matrix[row][assigned_col], track.confirmed ? 1 : 0, track.age);
+                    }
+                    else
+                    {
+                        track.matched_this_frame = false;
+                    }
+                }
+            }
+
             for (uint32_t track_id : track_order)
             {
                 auto track_it = tracks_.find(track_id);
                 if (track_it == tracks_.end())
-                {
                     continue;
-                }
 
                 TrackState &track = track_it->second;
-                size_t best_candidate_index = candidates.size();
-                double best_score = -std::numeric_limits<double>::infinity();
-                double best_iou = 0.0;
-                double best_center_dist_norm = std::numeric_limits<double>::infinity();
-
-                for (size_t i = 0; i < candidates.size(); ++i)
+                if (track.matched_this_frame)
+                    continue;
+                if (track.confirmed)
                 {
-                    if (candidate_used[i])
-                        continue;
-
-                    double iou = 0.0;
-                    double center_dist_norm = std::numeric_limits<double>::infinity();
-                    const double score = scoreCandidate(candidates[i], track, &iou, &center_dist_norm);
-                    if (score > best_score)
-                    {
-                        best_score = score;
-                        best_candidate_index = i;
-                        best_iou = iou;
-                        best_center_dist_norm = center_dist_norm;
-                    }
-                }
-
-                if (best_candidate_index < candidates.size())
-                {
-                    track.candidate = candidates[best_candidate_index];
-                    track.candidate.index = candidates[best_candidate_index].index;
-                    track.age += 1;
-                    track.lost_frames = 0;
-                    track.matched_this_frame = true;
-                    if (!track.confirmed)
-                    {
-                        ++track.confirm_count;
-                        if (track.confirm_count >= static_cast<uint32_t>(reacquire_confirm_frames_))
-                        {
-                            track.confirmed = true;
-                        }
-                    }
-                    candidate_used[best_candidate_index] = true;
-                    RCLCPP_DEBUG(this->get_logger(),
-                                 "track %u matched det %zu iou=%.4f center_dist=%.4f confirmed=%d age=%u",
-                                 track.track_id, best_candidate_index, best_iou, best_center_dist_norm, track.confirmed ? 1 : 0, track.age);
-                }
-                else
-                {
-                    track.matched_this_frame = false;
-                    if (track.confirmed)
-                    {
-                        ++track.lost_frames;
-                    }
+                    ++track.lost_frames;
                 }
             }
 

@@ -97,6 +97,7 @@ namespace axispose
         int reacquire_confirm_frames_{2};
         double iou_keep_min_{0.15};
         double center_dist_max_ratio_{0.14};
+        double association_min_score_{0.35};
         bool debug_enabled_{true};
         std::string debug_topic_{"/yolo/seg_debug"};
     };
