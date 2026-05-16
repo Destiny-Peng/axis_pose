@@ -408,7 +408,7 @@ namespace axispose
             const cv::Scalar color = trackColor(object_item.track_id);
             cv::Mat color_mask = cv::Mat::zeros(rgb_cv.size(), CV_8UC3);
             color_mask.setTo(color, mask_cv);
-            cv::addWeighted(color_mask, 0.35, vis, 1, 0.0, vis);
+            cv::addWeighted(color_mask, 0.85, vis, 1, 0.0, vis);
 
             auto it = lookup.find(object_item.track_id);
             if (it == lookup.end() || it->second == nullptr)

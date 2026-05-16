@@ -4,19 +4,19 @@
     frame_id: camera_color_optical_frame
     camera_name: d457
     loop: true
-    voxel_leaf_size: 0.05
+    voxel_leaf_size: 0.04
     sor_mean_k: 20.0
     sor_std_mul: 0.5
     statistics_enabled: true
     use_sor: true
     use_euclidean_cluster: true
-    sacline_distance_threshold: 0.1
+    sacline_distance_threshold: 0.2
     evaluation_timeout_seconds: 65
     groundtruth_eval_enabled: false
     groundtruth_images_dir: ""
     groundtruth_camera_info_file: config/d457_color.yaml
     groundtruth_tag_size_m: 0.05
-    cluster_mode: 2
+    cluster_mode: 3 # 0: max-cluster->z-bin->SACLine, 1: largest cluster, 2: RANSAC line inliers, 3: raw mask-only cloud
     color_image_topic: /camera/color/image_raw
     depth_image_topic: /camera/depth/image_rect_raw
     color_camera_info_topic: /camera/color/camera_info
@@ -36,16 +36,26 @@
     save_visualization: false
     save_every_n: 1
     kalman_enabled: false
-    kalman_position_process_noise: 0.02
-    kalman_position_measurement_noise: 0.02
-    kalman_axis_process_noise: 0.04
-    kalman_axis_measurement_noise: 0.008
-    kalman_initial_covariance: 1.0
+    kalman_position_process_noise: 0.01
+    kalman_position_measurement_noise: 0.025
+    kalman_axis_process_noise: 0.004
+    kalman_axis_measurement_noise: 0.01
+    kalman_initial_covariance: 0.5
     kalman_min_dt: 0.001
-    kalman_max_dt: 0.2
+    kalman_max_dt: 0.5
     ceres_max_iterations: 100
-    ceres_max_points: 300
-    ceres_weight_2d: 5.0
-    ceres_weight_pos: 20.0
-    ceres_weight_3d_pos: 1.0
+    ceres_max_points: 1000
+    ceres_weight_2d: 1.5
+    ceres_weight_pos: 5.0
+    ceres_weight_3d_pos: 2.0
     x_plane_d: 6.0
+    # Z-bin segmentation parameters for mode0 (max-cluster -> z-bin -> sacline)
+    z_bin_width: 0.02
+    z_bin_peak_ratio: 0.5
+    z_bin_min_bins: 3
+    z_bin_axis: z
+    # Debug: publish per-object pointclouds for diagnosis (disabled by default)
+    debug_publish_pointclouds: true
+    debug_publish_only_on_anomaly: false
+    debug_publish_max_points: 5000
+    debug_publish_raw_pointclouds: true

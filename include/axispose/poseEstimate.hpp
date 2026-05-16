@@ -91,6 +91,14 @@ namespace axispose
         // Publishers
         rclcpp::Publisher<axispose_msgs::msg::TrackedPoseArray>::SharedPtr tracked_pose_pub_;
         rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_cloud_pub_;
+        // Debug: per-object published pointclouds for diagnosis (no track id included)
+        bool debug_publish_pointclouds_{false};
+        bool debug_publish_only_on_anomaly_{false};
+        int debug_publish_max_points_{5000};
+        rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_pointcloud_pub_;
+        // Debug: raw mask-only pointclouds before denoise / clustering.
+        bool debug_publish_raw_pointclouds_{false};
+        rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_raw_pointcloud_pub_;
 
         // Intrinsics (stored as OpenCV camera matrices for readability and consistency).
         std::atomic<bool> have_intrinsics_depth_{false};
@@ -119,6 +127,11 @@ namespace axispose
         double ceres_weight_pos_ = 20.0;
         double ceres_weight_3d_pos_ = 1.0;
         double x_plane_d_ = 0.0;
+        // Z-bin parameters for cluster_mode == 0
+        double z_bin_width_ = 0.02;
+        double z_bin_peak_ratio_ = 0.35;
+        int z_bin_min_bins_ = 3;
+        std::string z_bin_axis_ = "z"; // axis name: "x","y","z"
 
         // (no mutex for parameter updates; parameter callbacks use ParameterEventHandler)
 

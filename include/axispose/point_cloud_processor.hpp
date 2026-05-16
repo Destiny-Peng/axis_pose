@@ -15,8 +15,13 @@ namespace axispose
         int sor_mean_k{50};
         double sor_std_mul{1.0};
         bool use_euclidean_cluster{true};
-        int cluster_mode{0}; // 0: closest to origin, 1: largest cluster, 2: max RANSAC inliers
+        int cluster_mode{0}; // 0: max-cluster -> Z-bin -> SACLine, 1: largest cluster, 2: max RANSAC inliers, 3: raw (no cluster, use mask-only cloud)
         double sacline_distance_threshold{0.05};
+        // Z-bin filtering parameters (used when cluster_mode == 0)
+        double bin_width{0.02};      // meters
+        double bin_peak_ratio{0.35}; // fraction of peak to expand band
+        int bin_min_bins{3};         // minimum contiguous bins to keep
+        std::string bin_axis{"z"};   // which coordinate axis to bin: "x","y","z"
     };
 
     class PointCloudProcessor

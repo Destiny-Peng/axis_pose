@@ -36,6 +36,14 @@ namespace axispose
         this->declare_parameter("ceres_weight_pos", ceres_weight_pos_);
         this->declare_parameter("ceres_weight_3d_pos", ceres_weight_3d_pos_);
         this->declare_parameter("x_plane_d", x_plane_d_);
+        this->declare_parameter("z_bin_width", z_bin_width_);
+        this->declare_parameter("z_bin_peak_ratio", z_bin_peak_ratio_);
+        this->declare_parameter("z_bin_min_bins", z_bin_min_bins_);
+        this->declare_parameter("z_bin_axis", z_bin_axis_);
+        this->declare_parameter("debug_publish_pointclouds", debug_publish_pointclouds_);
+        this->declare_parameter("debug_publish_only_on_anomaly", debug_publish_only_on_anomaly_);
+        this->declare_parameter("debug_publish_max_points", debug_publish_max_points_);
+        this->declare_parameter("debug_publish_raw_pointclouds", debug_publish_raw_pointclouds_);
 
         // statistics parameters
         this->declare_parameter("statistics_directory_path", statistics_directory_path_);
@@ -70,6 +78,14 @@ namespace axispose
         ceres_weight_pos_ = this->get_parameter("ceres_weight_pos").as_double();
         ceres_weight_3d_pos_ = this->get_parameter("ceres_weight_3d_pos").as_double();
         x_plane_d_ = this->get_parameter("x_plane_d").as_double();
+        z_bin_width_ = this->get_parameter("z_bin_width").as_double();
+        z_bin_peak_ratio_ = this->get_parameter("z_bin_peak_ratio").as_double();
+        z_bin_min_bins_ = this->get_parameter("z_bin_min_bins").as_int();
+        z_bin_axis_ = this->get_parameter("z_bin_axis").as_string();
+        debug_publish_pointclouds_ = this->get_parameter("debug_publish_pointclouds").as_bool();
+        debug_publish_only_on_anomaly_ = this->get_parameter("debug_publish_only_on_anomaly").as_bool();
+        debug_publish_max_points_ = this->get_parameter("debug_publish_max_points").as_int();
+        debug_publish_raw_pointclouds_ = this->get_parameter("debug_publish_raw_pointclouds").as_bool();
         kalman_enabled_ = this->get_parameter("kalman_enabled").as_bool();
         kalman_position_process_noise_ = this->get_parameter("kalman_position_process_noise").as_double();
         kalman_position_measurement_noise_ = this->get_parameter("kalman_position_measurement_noise").as_double();
@@ -112,7 +128,8 @@ namespace axispose
             std::bind(&PoseEstimateBase::cameraInfoDepthCallback, this, std::placeholders::_1));
 
         tracked_pose_pub_ = this->create_publisher<axispose_msgs::msg::TrackedPoseArray>(tracked_pose_topic, 10);
-        debug_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/shaft/debug_cloud", 1);
+        debug_pointcloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/shaft/debug_pointclouds", qos);
+        debug_raw_pointcloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/shaft/debug_raw_pointclouds", qos);
 
         // initialize debug manager (controls runtime debug flags via parameter `debug_flags`)
         debug_ = std::make_shared<DebugManager>(this);
@@ -513,7 +530,51 @@ namespace axispose
                 continue;
             }
 
+            if (debug_publish_raw_pointclouds_ && debug_raw_pointcloud_pub_)
+            {
+                pcl::PointCloud<pcl::PointXYZ>::Ptr raw_pub_cloud(new pcl::PointCloud<pcl::PointXYZ>(*valid_cloud));
+                if (debug_publish_max_points_ > 0 && raw_pub_cloud->points.size() > static_cast<size_t>(debug_publish_max_points_))
+                {
+                    pcl::PointCloud<pcl::PointXYZ>::Ptr tmp(new pcl::PointCloud<pcl::PointXYZ>());
+                    tmp->points.reserve(static_cast<size_t>(debug_publish_max_points_));
+                    for (size_t i = 0; i < static_cast<size_t>(debug_publish_max_points_); ++i)
+                        tmp->points.push_back(raw_pub_cloud->points[i]);
+                    tmp->width = static_cast<uint32_t>(tmp->points.size());
+                    tmp->height = 1;
+                    raw_pub_cloud.swap(tmp);
+                }
+
+                sensor_msgs::msg::PointCloud2 raw_cloud_msg;
+                pcl::toROSMsg(*raw_pub_cloud, raw_cloud_msg);
+                raw_cloud_msg.header.stamp = depth_msg->header.stamp;
+                raw_cloud_msg.header.frame_id = have_intrinsics_color_ ? color_frame_id_ : frame_id_;
+                debug_raw_pointcloud_pub_->publish(raw_cloud_msg);
+            }
+
             denoisePointCloud(valid_cloud);
+
+            // Debug: publish per-object pointcloud for diagnosis (no track id)
+            if (debug_publish_pointclouds_ && debug_pointcloud_pub_)
+            {
+                pcl::PointCloud<pcl::PointXYZ>::Ptr pub_cloud(new pcl::PointCloud<pcl::PointXYZ>(*valid_cloud));
+                if (debug_publish_max_points_ > 0 && pub_cloud->points.size() > static_cast<size_t>(debug_publish_max_points_))
+                {
+                    // simple deterministic downsample: take first N points
+                    pcl::PointCloud<pcl::PointXYZ>::Ptr tmp(new pcl::PointCloud<pcl::PointXYZ>());
+                    tmp->points.reserve(static_cast<size_t>(debug_publish_max_points_));
+                    for (size_t i = 0; i < static_cast<size_t>(debug_publish_max_points_); ++i)
+                        tmp->points.push_back(pub_cloud->points[i]);
+                    tmp->width = static_cast<uint32_t>(tmp->points.size());
+                    tmp->height = 1;
+                    pub_cloud.swap(tmp);
+                }
+
+                sensor_msgs::msg::PointCloud2 cloud_msg;
+                pcl::toROSMsg(*pub_cloud, cloud_msg);
+                cloud_msg.header.stamp = depth_msg->header.stamp;
+                cloud_msg.header.frame_id = have_intrinsics_color_ ? color_frame_id_ : frame_id_;
+                debug_pointcloud_pub_->publish(cloud_msg);
+            }
 
             geometry_msgs::msg::PoseStamped pose_msg;
             if (benchmark_)
@@ -584,6 +645,11 @@ namespace axispose
         options.use_euclidean_cluster = use_euclidean_cluster_;
         options.cluster_mode = cluster_mode_;
         options.sacline_distance_threshold = sacline_distance_threshold_;
+        // propagate z-bin params to options
+        options.bin_width = z_bin_width_;
+        options.bin_peak_ratio = z_bin_peak_ratio_;
+        options.bin_min_bins = z_bin_min_bins_;
+        options.bin_axis = z_bin_axis_;
         pc_processor_->denoisePointCloud(cloud, options);
     }
 
