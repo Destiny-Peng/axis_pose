@@ -27,7 +27,7 @@
     tracked_pose_topic: /shaft/tracked_poses
     tracking_enabled: true
     lost_grace_frames: 15
-    reacquire_confirm_frames: 10
+    reacquire_confirm_frames: 2
     iou_keep_min: 0.70
     center_dist_max_ratio: 0.15
     debug_topic: /yolo/seg_debug
@@ -35,14 +35,21 @@
     debug_flags: ["debug_cloud"]
     save_visualization: false
     save_every_n: 1
-    kalman_enabled: false
-    kalman_position_process_noise: 0.01
-    kalman_position_measurement_noise: 0.025
-    kalman_axis_process_noise: 0.004
+    kalman_enabled: true
+    kalman_position_process_noise: 0.05
+    kalman_position_measurement_noise: 0.02
+    kalman_axis_process_noise: 0.01
     kalman_axis_measurement_noise: 0.01
     kalman_initial_covariance: 0.5
     kalman_min_dt: 0.001
     kalman_max_dt: 0.5
+    # Adaptive Kalman parameters
+    kalman_adaptive_enabled: true
+    kalman_adaptive_scale: 10.0
+    kalman_innovation_threshold: 0.02
+    kalman_adaptive_decay: 0.9
+    kalman_reset_on_large_jump: false
+    kalman_reset_threshold: 0.2
     ceres_max_iterations: 100
     ceres_max_points: 1000
     ceres_weight_2d: 1.5

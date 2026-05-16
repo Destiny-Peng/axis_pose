@@ -253,7 +253,9 @@ namespace axispose
     axispose_msgs::msg::TrackedObject SegmentNode::buildTrackedObjectMessage(const TrackCandidate &candidate,
                                                                              const std_msgs::msg::Header &header,
                                                                              uint32_t track_id,
-                                                                             uint8_t status) const
+                                                                             uint8_t status,
+                                                                             uint32_t age,
+                                                                             uint32_t lost_frames) const
     {
         axispose_msgs::msg::TrackedObject msg;
         msg.header = header;
@@ -261,14 +263,28 @@ namespace axispose
         msg.class_id = -1;
         msg.score = candidate.confidence;
         msg.status = status;
-        msg.age = 1;
-        msg.lost_frames = 0;
+        msg.age = age;
+        msg.lost_frames = lost_frames;
         msg.bbox.x_offset = static_cast<uint32_t>(std::max(0, candidate.bbox.x));
         msg.bbox.y_offset = static_cast<uint32_t>(std::max(0, candidate.bbox.y));
         msg.bbox.width = static_cast<uint32_t>(std::max(0, candidate.bbox.width));
         msg.bbox.height = static_cast<uint32_t>(std::max(0, candidate.bbox.height));
         msg.bbox.do_rectify = false;
-        msg.mask = *cv_bridge::CvImage(header, "mono8", candidate.mask).toImageMsg();
+        if (!candidate.mask.empty())
+        {
+            msg.mask = *cv_bridge::CvImage(header, "mono8", candidate.mask).toImageMsg();
+        }
+        else
+        {
+            sensor_msgs::msg::Image empty_mask;
+            empty_mask.header = header;
+            empty_mask.height = 0;
+            empty_mask.width = 0;
+            empty_mask.encoding = "mono8";
+            empty_mask.is_bigendian = false;
+            empty_mask.step = 0;
+            msg.mask = empty_mask;
+        }
         return msg;
     }
 
@@ -306,6 +322,11 @@ namespace axispose
                 const int src_x_offset = std::max(0, -xyxy[0]);
                 const int src_y_offset = std::max(0, -xyxy[1]);
 
+                if (result.masks[i].height <= 0 || result.masks[i].width <= 0 || result.masks[i].data.empty())
+                {
+                    continue;
+                }
+
                 cv::Mat float_mask(result.masks[i].height, result.masks[i].width, CV_32FC1, result.masks[i].data.data());
                 cv::Mat resized_mask;
                 cv::resize(float_mask, resized_mask, cv::Size(w, h), 0, 0, cv::INTER_LINEAR);
@@ -340,213 +361,239 @@ namespace axispose
                 candidates.push_back(std::move(candidate));
             }
 
-            // First, run the state machine to update tracked_index_ and current_track_id_
             cv::Mat output_mask = cv::Mat::zeros(image.rows, image.cols, CV_8UC1);
-            std::string state = "empty";
-            int selected_index = -1;
-            double matched_iou = 0.0;
-            double matched_center_dist_norm = std::numeric_limits<double>::infinity();
-            const TrackCandidate *selected_candidate = nullptr;
+            for (const auto &candidate : candidates)
+            {
+                if (!candidate.mask.empty())
+                {
+                    candidate.mask.copyTo(output_mask, candidate.mask);
+                }
+            }
+
+            axispose_msgs::msg::TrackedObjectArray tracked_objects_msg;
+            tracked_objects_msg.header = msg->header;
 
             if (!tracking_enabled_)
             {
-                for (size_t i = 0; i < candidate_count; ++i)
+                tracks_.clear();
+                tracked_objects_msg.objects.reserve(candidates.size());
+                for (const auto &candidate : candidates)
                 {
-                    auto &box = result.boxes[i];
-                    auto xyxy = box.xyxy();
-                    const int x1 = std::max(0, xyxy[0]);
-                    const int y1 = std::max(0, xyxy[1]);
-                    const int x2 = std::min(image.cols, xyxy[2] + 1);
-                    const int y2 = std::min(image.rows, xyxy[3] + 1);
-                    int w = std::max(x2 - x1, 1);
-                    int h = std::max(y2 - y1, 1);
-                    if (w <= 0 || h <= 0)
-                        continue;
-
-                    const int src_x_offset = std::max(0, -xyxy[0]);
-                    const int src_y_offset = std::max(0, -xyxy[1]);
-
-                    cv::Mat float_mask(result.masks[i].height, result.masks[i].width, CV_32FC1, result.masks[i].data.data());
-                    cv::Mat resized_mask;
-                    cv::resize(float_mask, resized_mask, cv::Size(w, h), 0, 0, cv::INTER_LINEAR);
-
-                    cv::Mat bool_mask;
-                    cv::threshold(resized_mask, bool_mask, 0.5, 255, cv::THRESH_BINARY);
-                    bool_mask.convertTo(bool_mask, CV_8UC1);
-
-                    if (src_x_offset + w > bool_mask.cols)
-                        w = bool_mask.cols - src_x_offset;
-                    if (src_y_offset + h > bool_mask.rows)
-                        h = bool_mask.rows - src_y_offset;
-                    if (w <= 0 || h <= 0)
-                        continue;
-
-                    const cv::Rect source_rect(src_x_offset, src_y_offset, w, h);
-                    const cv::Rect target_rect(x1, y1, w, h);
-                    bool_mask(source_rect).copyTo(output_mask(target_rect), bool_mask(source_rect));
+                    const uint32_t track_id = next_track_id_++;
+                    tracked_objects_msg.objects.push_back(
+                        buildTrackedObjectMessage(candidate,
+                                                  msg->header,
+                                                  track_id,
+                                                  axispose_msgs::msg::TrackedObject::STATUS_TENTATIVE,
+                                                  1,
+                                                  0));
                 }
-                state = "legacy_merge";
-            }
-            else if (candidates.empty())
-            {
-                if (track_active_)
+
+                if (debug_pub_)
                 {
-                    ++lost_frames_;
-                    state = (lost_frames_ > lost_grace_frames_) ? "released" : "lost";
-                    if (lost_frames_ > lost_grace_frames_)
+                    std_msgs::msg::String debug_msg;
+                    debug_msg.data = "state=tracking_disabled;candidates=" + std::to_string(candidates.size()) +
+                                     ";tracks=0;confirmed=0;tentative=" + std::to_string(candidates.size()) + ";lost=0";
+                    debug_pub_->publish(debug_msg);
+                }
+
+                auto out_msg = cv_bridge::CvImage(msg->header, "mono8", output_mask).toImageMsg();
+                pub_->publish(*out_msg);
+                if (tracked_objects_pub_)
+                {
+                    tracked_objects_pub_->publish(tracked_objects_msg);
+                }
+                return;
+            }
+
+            for (auto &entry : tracks_)
+            {
+                entry.second.matched_this_frame = false;
+            }
+
+            std::vector<uint32_t> track_order;
+            track_order.reserve(tracks_.size());
+            for (const auto &entry : tracks_)
+            {
+                track_order.push_back(entry.first);
+            }
+            std::sort(track_order.begin(), track_order.end(), [this](uint32_t lhs, uint32_t rhs)
+                      {
+                const auto &track_lhs = tracks_.at(lhs);
+                const auto &track_rhs = tracks_.at(rhs);
+                if (track_lhs.confirmed != track_rhs.confirmed)
+                    return track_lhs.confirmed > track_rhs.confirmed;
+                if (track_lhs.age != track_rhs.age)
+                    return track_lhs.age > track_rhs.age;
+                if (track_lhs.lost_frames != track_rhs.lost_frames)
+                    return track_lhs.lost_frames < track_rhs.lost_frames;
+                return lhs < rhs; });
+
+            std::vector<bool> candidate_used(candidates.size(), false);
+            auto scoreCandidate = [&](const TrackCandidate &candidate, const TrackState &track, double *out_iou, double *out_center_dist_norm) -> double
+            {
+                const double iou = computeIoU(candidate.bbox, track.candidate.bbox);
+                const double center_dist_norm = computeNormalizedCenterDistance(candidate.center, track.candidate.center, image.size());
+                if (out_iou)
+                    *out_iou = iou;
+                if (out_center_dist_norm)
+                    *out_center_dist_norm = center_dist_norm;
+                if (iou < iou_keep_min_ && center_dist_norm > center_dist_max_ratio_)
+                {
+                    return -std::numeric_limits<double>::infinity();
+                }
+                const double score = std::clamp(iou, 0.0, 1.0) * 0.7 +
+                                     (1.0 - std::min(center_dist_norm / std::max(center_dist_max_ratio_, 1e-6), 1.0)) * 0.25 +
+                                     static_cast<double>(candidate.confidence) * 0.05;
+                return score;
+            };
+
+            for (uint32_t track_id : track_order)
+            {
+                auto track_it = tracks_.find(track_id);
+                if (track_it == tracks_.end())
+                {
+                    continue;
+                }
+
+                TrackState &track = track_it->second;
+                size_t best_candidate_index = candidates.size();
+                double best_score = -std::numeric_limits<double>::infinity();
+                double best_iou = 0.0;
+                double best_center_dist_norm = std::numeric_limits<double>::infinity();
+
+                for (size_t i = 0; i < candidates.size(); ++i)
+                {
+                    if (candidate_used[i])
+                        continue;
+
+                    double iou = 0.0;
+                    double center_dist_norm = std::numeric_limits<double>::infinity();
+                    const double score = scoreCandidate(candidates[i], track, &iou, &center_dist_norm);
+                    if (score > best_score)
                     {
-                        RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
-                                     "→ RELEASED (no candidates): track_id=%d", current_track_id_);
-                        track_active_ = false;
-                        tracked_index_ = -1;
-                        current_track_id_ = 0;
-                        pending_confirm_count_ = 0;
+                        best_score = score;
+                        best_candidate_index = i;
+                        best_iou = iou;
+                        best_center_dist_norm = center_dist_norm;
                     }
                 }
-            }
-            else if (track_active_)
-            {
-                RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
-                             "=== LOCKED STATE: permanent_track_id=%d candidates=%zu", current_track_id_, candidates.size());
-                TrackCandidate best_candidate = selectTrackCandidate(candidates, image.size(), &matched_iou, &matched_center_dist_norm);
-                if (best_candidate.index >= 0)
+
+                if (best_candidate_index < candidates.size())
                 {
-                    lost_frames_ = 0;
-                    tracked_index_ = best_candidate.index;
-                    tracked_bbox_ = best_candidate.bbox;
-                    tracked_center_ = best_candidate.center;
-                    tracked_area_ = best_candidate.area;
-                    tracked_confidence_ = best_candidate.confidence;
-                    output_mask = best_candidate.mask;
-                    selected_index = best_candidate.index;
-                    selected_candidate = &best_candidate;
-                    state = "locked";
-                    RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
-                                 "→ STAY LOCKED: track_id=%d matched with detection[%d]", current_track_id_, best_candidate.index);
+                    track.candidate = candidates[best_candidate_index];
+                    track.candidate.index = candidates[best_candidate_index].index;
+                    track.age += 1;
+                    track.lost_frames = 0;
+                    track.matched_this_frame = true;
+                    if (!track.confirmed)
+                    {
+                        ++track.confirm_count;
+                        if (track.confirm_count >= static_cast<uint32_t>(reacquire_confirm_frames_))
+                        {
+                            track.confirmed = true;
+                        }
+                    }
+                    candidate_used[best_candidate_index] = true;
+                    RCLCPP_DEBUG(this->get_logger(),
+                                 "track %u matched det %zu iou=%.4f center_dist=%.4f confirmed=%d age=%u",
+                                 track.track_id, best_candidate_index, best_iou, best_center_dist_norm, track.confirmed ? 1 : 0, track.age);
                 }
                 else
                 {
-                    ++lost_frames_;
-                    state = (lost_frames_ > lost_grace_frames_) ? "released" : "lost";
-                    RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
-                                 "→ NO MATCH: track_id=%d transition to %s (lost_frames=%d/%d)",
-                                 current_track_id_, state.c_str(), lost_frames_, lost_grace_frames_);
-                    if (lost_frames_ > lost_grace_frames_)
+                    track.matched_this_frame = false;
+                    if (track.confirmed)
                     {
-                        RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
-                                     "→ RELEASED: track_id=%d is now released", current_track_id_);
-                        track_active_ = false;
-                        tracked_index_ = -1;
-                        current_track_id_ = 0;
-                        pending_confirm_count_ = 0;
+                        ++track.lost_frames;
                     }
                 }
             }
-            else
+
+            for (size_t i = 0; i < candidates.size(); ++i)
             {
-                TrackCandidate best_initial_candidate = selectInitialCandidate(candidates, image.size());
-                if (best_initial_candidate.index >= 0)
+                if (candidate_used[i])
+                    continue;
+
+                TrackState new_track;
+                new_track.track_id = next_track_id_++;
+                new_track.candidate = candidates[i];
+                new_track.age = 1;
+                new_track.confirm_count = 1;
+                new_track.lost_frames = 0;
+                new_track.confirmed = (reacquire_confirm_frames_ <= 1);
+                new_track.matched_this_frame = true;
+                tracks_.emplace(new_track.track_id, std::move(new_track));
+                candidate_used[i] = true;
+            }
+
+            std::vector<uint32_t> tracks_to_remove;
+            tracks_to_remove.reserve(tracks_.size());
+            for (const auto &entry : tracks_)
+            {
+                const TrackState &track = entry.second;
+                if (!track.confirmed && !track.matched_this_frame)
                 {
-                    if (pending_confirm_count_ <= 0)
+                    tracks_to_remove.push_back(entry.first);
+                }
+                else if (track.confirmed && track.lost_frames > static_cast<uint32_t>(lost_grace_frames_))
+                {
+                    tracks_to_remove.push_back(entry.first);
+                }
+            }
+
+            tracked_objects_msg.objects.reserve(tracks_.size());
+            size_t confirmed_count = 0;
+            size_t tentative_count = 0;
+            size_t lost_count = 0;
+            for (auto &entry : tracks_)
+            {
+                TrackState &track = entry.second;
+                TrackCandidate publish_candidate = track.candidate;
+                uint8_t status = axispose_msgs::msg::TrackedObject::STATUS_TENTATIVE;
+
+                if (track.confirmed)
+                {
+                    if (track.matched_this_frame)
                     {
-                        pending_bbox_ = best_initial_candidate.bbox;
-                        pending_center_ = best_initial_candidate.center;
-                        pending_area_ = best_initial_candidate.area;
-                        pending_confidence_ = best_initial_candidate.confidence;
-                        pending_confirm_count_ = 1;
+                        status = axispose_msgs::msg::TrackedObject::STATUS_CONFIRMED;
+                        ++confirmed_count;
                     }
                     else
                     {
-                        TrackCandidate pending_candidate;
-                        pending_candidate.bbox = pending_bbox_;
-                        pending_candidate.center = pending_center_;
-                        pending_candidate.area = pending_area_;
-                        pending_candidate.confidence = pending_confidence_;
-
-                        if (isSimilarCandidate(best_initial_candidate, pending_candidate, image.size(), center_dist_max_ratio_))
-                        {
-                            ++pending_confirm_count_;
-                            pending_bbox_ = best_initial_candidate.bbox;
-                            pending_center_ = best_initial_candidate.center;
-                            pending_area_ = best_initial_candidate.area;
-                            pending_confidence_ = best_initial_candidate.confidence;
-                        }
-                        else
-                        {
-                            pending_bbox_ = best_initial_candidate.bbox;
-                            pending_center_ = best_initial_candidate.center;
-                            pending_area_ = best_initial_candidate.area;
-                            pending_confidence_ = best_initial_candidate.confidence;
-                            pending_confirm_count_ = 1;
-                        }
-                    }
-
-                    if (pending_confirm_count_ >= reacquire_confirm_frames_)
-                    {
-                        track_active_ = true;
-                        current_track_id_ = next_track_id_++;
-                        lost_frames_ = 0;
-                        tracked_index_ = best_initial_candidate.index;
-                        tracked_bbox_ = best_initial_candidate.bbox;
-                        tracked_center_ = best_initial_candidate.center;
-                        tracked_area_ = best_initial_candidate.area;
-                        tracked_confidence_ = best_initial_candidate.confidence;
-                        output_mask = best_initial_candidate.mask;
-                        selected_index = best_initial_candidate.index;
-                        selected_candidate = &best_initial_candidate;
-                        pending_confirm_count_ = 0;
-                        state = "locked";
-                        RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
-                                     "→ CONFIRMED LOCK: assigned permanent track_id=%d", current_track_id_);
-                    }
-                    else
-                    {
-                        state = "pending";
+                        status = axispose_msgs::msg::TrackedObject::STATUS_LOST;
+                        ++lost_count;
+                        publish_candidate.mask.release();
                     }
                 }
+                else
+                {
+                    status = axispose_msgs::msg::TrackedObject::STATUS_TENTATIVE;
+                    ++tentative_count;
+                }
+
+                tracked_objects_msg.objects.push_back(
+                    buildTrackedObjectMessage(publish_candidate,
+                                              msg->header,
+                                              track.track_id,
+                                              status,
+                                              track.age,
+                                              track.lost_frames));
+            }
+
+            for (uint32_t track_id : tracks_to_remove)
+            {
+                tracks_.erase(track_id);
             }
 
             if (debug_pub_)
             {
                 std_msgs::msg::String debug_msg;
-                debug_msg.data = buildDebugString(state,
-                                                  candidates,
-                                                  selected_candidate,
-                                                  static_cast<int>(candidates.size()),
-                                                  selected_index,
-                                                  lost_frames_,
-                                                  pending_confirm_count_,
-                                                  matched_iou,
-                                                  matched_center_dist_norm);
+                debug_msg.data = "state=multi_target;candidate_count=" + std::to_string(candidates.size()) +
+                                 ";tracks=" + std::to_string(tracks_.size()) +
+                                 ";confirmed=" + std::to_string(confirmed_count) +
+                                 ";tentative=" + std::to_string(tentative_count) +
+                                 ";lost=" + std::to_string(lost_count);
                 debug_pub_->publish(debug_msg);
-            }
-
-            // NOW build and publish tracked_objects_msg based on updated tracked_index_ and current_track_id_
-            axispose_msgs::msg::TrackedObjectArray tracked_objects_msg;
-            tracked_objects_msg.header = msg->header;
-            tracked_objects_msg.objects.reserve(candidates.size());
-            for (const auto &candidate : candidates)
-            {
-                const bool is_selected = track_active_ && candidate.index == tracked_index_;
-                const uint8_t status = is_selected ? axispose_msgs::msg::TrackedObject::STATUS_CONFIRMED
-                                                   : axispose_msgs::msg::TrackedObject::STATUS_TENTATIVE;
-                // For confirmed tracks (LOCKED), use permanent track_id; for tentative detections, use 0
-                uint32_t track_id = is_selected ? current_track_id_ : 0U;
-                tracked_objects_msg.objects.push_back(
-                    buildTrackedObjectMessage(candidate, msg->header, track_id, status));
-            }
-
-            // Print all track assignments for debugging (after state machine)
-            RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
-                         "[MSG OUTPUT] Publishing %zu objects:", tracked_objects_msg.objects.size());
-            for (size_t i = 0; i < tracked_objects_msg.objects.size(); ++i)
-            {
-                const auto &obj = tracked_objects_msg.objects[i];
-                RCLCPP_DEBUG(rclcpp::get_logger("segment_node"),
-                             "  [%zu] track_id=%d status=%s bbox:(%d,%d,%d,%d)",
-                             i, obj.track_id,
-                             (obj.status == axispose_msgs::msg::TrackedObject::STATUS_CONFIRMED) ? "CONFIRMED" : "TENTATIVE",
-                             obj.bbox.x_offset, obj.bbox.y_offset, obj.bbox.width, obj.bbox.height);
             }
 
             auto out_msg = cv_bridge::CvImage(msg->header, "mono8", output_mask).toImageMsg();

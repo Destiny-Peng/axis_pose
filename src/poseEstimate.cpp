@@ -57,6 +57,13 @@ namespace axispose
         this->declare_parameter("kalman_min_dt", kalman_min_dt_);
         this->declare_parameter("kalman_max_dt", kalman_max_dt_);
 
+        this->declare_parameter("kalman_adaptive_enabled", kalman_adaptive_enabled_);
+        this->declare_parameter("kalman_adaptive_scale", kalman_adaptive_scale_);
+        this->declare_parameter("kalman_innovation_threshold", kalman_innovation_threshold_);
+        this->declare_parameter("kalman_adaptive_decay", kalman_adaptive_decay_);
+        this->declare_parameter("kalman_reset_on_large_jump", kalman_reset_on_large_jump_);
+        this->declare_parameter("kalman_reset_threshold", kalman_reset_threshold_);
+
         std::string depth_image_topic = this->get_parameter("depth_image_topic").as_string();
         std::string mask_topic = this->get_parameter("mask_topic").as_string();
         std::string tracked_objects_topic = this->get_parameter("tracked_objects_topic").as_string();
@@ -94,6 +101,12 @@ namespace axispose
         kalman_initial_covariance_ = this->get_parameter("kalman_initial_covariance").as_double();
         kalman_min_dt_ = this->get_parameter("kalman_min_dt").as_double();
         kalman_max_dt_ = this->get_parameter("kalman_max_dt").as_double();
+        kalman_adaptive_enabled_ = this->get_parameter("kalman_adaptive_enabled").as_bool();
+        kalman_adaptive_scale_ = this->get_parameter("kalman_adaptive_scale").as_double();
+        kalman_innovation_threshold_ = this->get_parameter("kalman_innovation_threshold").as_double();
+        kalman_adaptive_decay_ = this->get_parameter("kalman_adaptive_decay").as_double();
+        kalman_reset_on_large_jump_ = this->get_parameter("kalman_reset_on_large_jump").as_bool();
+        kalman_reset_threshold_ = this->get_parameter("kalman_reset_threshold").as_double();
 
         RCLCPP_INFO(this->get_logger(), "PoseEstimate node starting. Depth: %s Mask: %s TrackedObjects: %s",
                     depth_image_topic.c_str(), mask_topic.c_str(), tracked_objects_topic.c_str());
@@ -209,6 +222,54 @@ namespace axispose
                                                                                       {
                                                                                           kalman_max_dt_ = p.as_double();
                                                                                           RCLCPP_INFO(this->get_logger(), "param updated: kalman_max_dt=%.6f", kalman_max_dt_);
+                                                                                      } }));
+
+        parameter_cb_handles_.push_back(param_subscriber_->add_parameter_callback("kalman_adaptive_enabled", [this](const rclcpp::Parameter &p)
+                                                                                  {
+                                                                                      if (p.get_name() == "kalman_adaptive_enabled")
+                                                                                      {
+                                                                                          kalman_adaptive_enabled_ = p.as_bool();
+                                                                                          RCLCPP_INFO(this->get_logger(), "param updated: kalman_adaptive_enabled=%d", kalman_adaptive_enabled_);
+                                                                                      } }));
+
+        parameter_cb_handles_.push_back(param_subscriber_->add_parameter_callback("kalman_adaptive_scale", [this](const rclcpp::Parameter &p)
+                                                                                  {
+                                                                                      if (p.get_name() == "kalman_adaptive_scale")
+                                                                                      {
+                                                                                          kalman_adaptive_scale_ = p.as_double();
+                                                                                          RCLCPP_INFO(this->get_logger(), "param updated: kalman_adaptive_scale=%.6f", kalman_adaptive_scale_);
+                                                                                      } }));
+
+        parameter_cb_handles_.push_back(param_subscriber_->add_parameter_callback("kalman_innovation_threshold", [this](const rclcpp::Parameter &p)
+                                                                                  {
+                                                                                      if (p.get_name() == "kalman_innovation_threshold")
+                                                                                      {
+                                                                                          kalman_innovation_threshold_ = p.as_double();
+                                                                                          RCLCPP_INFO(this->get_logger(), "param updated: kalman_innovation_threshold=%.6f", kalman_innovation_threshold_);
+                                                                                      } }));
+
+        parameter_cb_handles_.push_back(param_subscriber_->add_parameter_callback("kalman_adaptive_decay", [this](const rclcpp::Parameter &p)
+                                                                                  {
+                                                                                      if (p.get_name() == "kalman_adaptive_decay")
+                                                                                      {
+                                                                                          kalman_adaptive_decay_ = p.as_double();
+                                                                                          RCLCPP_INFO(this->get_logger(), "param updated: kalman_adaptive_decay=%.6f", kalman_adaptive_decay_);
+                                                                                      } }));
+
+        parameter_cb_handles_.push_back(param_subscriber_->add_parameter_callback("kalman_reset_on_large_jump", [this](const rclcpp::Parameter &p)
+                                                                                  {
+                                                                                      if (p.get_name() == "kalman_reset_on_large_jump")
+                                                                                      {
+                                                                                          kalman_reset_on_large_jump_ = p.as_bool();
+                                                                                          RCLCPP_INFO(this->get_logger(), "param updated: kalman_reset_on_large_jump=%d", kalman_reset_on_large_jump_);
+                                                                                      } }));
+
+        parameter_cb_handles_.push_back(param_subscriber_->add_parameter_callback("kalman_reset_threshold", [this](const rclcpp::Parameter &p)
+                                                                                  {
+                                                                                      if (p.get_name() == "kalman_reset_threshold")
+                                                                                      {
+                                                                                          kalman_reset_threshold_ = p.as_double();
+                                                                                          RCLCPP_INFO(this->get_logger(), "param updated: kalman_reset_threshold=%.6f", kalman_reset_threshold_);
                                                                                       } }));
 
         parameter_cb_handles_.push_back(param_subscriber_->add_parameter_callback("ceres_weight_2d", [this](const rclcpp::Parameter &p)
@@ -381,9 +442,41 @@ namespace axispose
             RCLCPP_INFO(this->get_logger(), "  raw_axis=(%.3f,%.3f,%.3f) corrected=(%.3f,%.3f,%.3f)", raw_axis.x(), raw_axis.y(), raw_axis.z(), axis_meas.x(), axis_meas.y(), axis_meas.z());
         }
 
+        // Compute position innovation magnitude (measurement - predicted)
+        Eigen::Vector3d innovation = raw_pos - state.pos_x;
+        double innovation_norm = innovation.norm();
+
+        // Update per-track adaptive Q scale: decay multiplicatively over time, then raise to desired if needed
+        if (kalman_adaptive_enabled_)
+        {
+            // multiplicative decay toward 1.0
+            double decay_factor = std::pow(std::clamp(kalman_adaptive_decay_, 0.0, 1.0), dt);
+            state.adaptive_q_scale = std::max(1.0, state.adaptive_q_scale * decay_factor);
+
+            // desired scale based on innovation (simple ratio rule)
+            double desired_scale = 1.0;
+            if (innovation_norm > kalman_innovation_threshold_ && kalman_innovation_threshold_ > 0.0)
+            {
+                desired_scale = std::min(kalman_adaptive_scale_, innovation_norm / std::max(1e-9, kalman_innovation_threshold_));
+            }
+            // if desired is larger than current, jump up immediately
+            if (desired_scale > state.adaptive_q_scale)
+                state.adaptive_q_scale = desired_scale;
+        }
+
+        // Optional: immediate reset on very large jump
+        if (kalman_reset_on_large_jump_ && innovation_norm > kalman_reset_threshold_)
+        {
+            state.pos_x = raw_pos;
+            state.pos_v.setZero();
+            state.adaptive_q_scale = 1.0;
+        }
+
+        double pos_process_noise = kalman_position_process_noise_ * state.adaptive_q_scale;
+
         for (int i = 0; i < 3; ++i)
         {
-            kalmanPredictUpdate1D(raw_pos[i], dt, kalman_position_process_noise_, kalman_position_measurement_noise_,
+            kalmanPredictUpdate1D(raw_pos[i], dt, pos_process_noise, kalman_position_measurement_noise_,
                                   state.pos_x[i], state.pos_v[i], state.pos_P[i]);
             kalmanPredictUpdate1D(axis_meas[i], dt, kalman_axis_process_noise_, kalman_axis_measurement_noise_,
                                   state.axis_x[i], state.axis_v[i], state.axis_P[i]);
@@ -476,7 +569,7 @@ namespace axispose
 
         for (const auto &tracked_object : tracked_objects_msg->objects)
         {
-            if (tracked_object.mask.data.empty())
+            if (tracked_object.mask.data.empty() || tracked_object.mask.height == 0 || tracked_object.mask.width == 0)
             {
                 continue;
             }
@@ -498,6 +591,13 @@ namespace axispose
             {
                 object_depth = alignDepthToColor(depth_cv, mask_cv.cols, mask_cv.rows);
                 point_cloud_camera_matrix = color_camera_matrix_;
+            }
+
+            if (object_depth.empty() || object_depth.cols == 0 || object_depth.rows == 0)
+            {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                                     "Skipping track %u because aligned depth is empty", tracked_object.track_id);
+                continue;
             }
 
             if (mask_cv.size() != object_depth.size())

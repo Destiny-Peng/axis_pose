@@ -400,6 +400,11 @@ namespace axispose
                 continue;
             }
 
+            if (mask_cv.empty() || mask_cv.cols == 0 || mask_cv.rows == 0)
+            {
+                continue;
+            }
+
             if (mask_cv.size() != rgb_cv.size())
             {
                 cv::resize(mask_cv, mask_cv, rgb_cv.size(), 0, 0, cv::INTER_NEAREST);

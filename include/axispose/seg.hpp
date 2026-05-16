@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
@@ -32,6 +33,17 @@ namespace axispose
             cv::Mat mask;
         };
 
+        struct TrackState
+        {
+            uint32_t track_id{0};
+            TrackCandidate candidate;
+            uint32_t age{0};
+            uint32_t confirm_count{0};
+            uint32_t lost_frames{0};
+            bool confirmed{false};
+            bool matched_this_frame{false};
+        };
+
         void image_callback(const sensor_msgs::msg::Image::SharedPtr msg);
         static double computeIoU(const cv::Rect &lhs, const cv::Rect &rhs);
         static double computeNormalizedCenterDistance(const cv::Point2d &lhs, const cv::Point2d &rhs, const cv::Size &frame_size);
@@ -41,7 +53,9 @@ namespace axispose
         axispose_msgs::msg::TrackedObject buildTrackedObjectMessage(const TrackCandidate &candidate,
                                                                     const std_msgs::msg::Header &header,
                                                                     uint32_t track_id,
-                                                                    uint8_t status) const;
+                                                                    uint8_t status,
+                                                                    uint32_t age,
+                                                                    uint32_t lost_frames) const;
         std::string buildDebugString(const std::string &state,
                                      const std::vector<TrackCandidate> &candidates,
                                      const TrackCandidate *selected_candidate,
@@ -77,6 +91,7 @@ namespace axispose
         int pending_confirm_count_{0};
 
         int lost_frames_{0};
+        std::unordered_map<uint32_t, TrackState> tracks_;
 
         int lost_grace_frames_{12};
         int reacquire_confirm_frames_{2};

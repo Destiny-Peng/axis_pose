@@ -177,6 +177,14 @@ namespace axispose
         double kalman_min_dt_ = 1e-3;
         double kalman_max_dt_ = 0.2;
 
+        // Adaptive Kalman parameters
+        bool kalman_adaptive_enabled_{false};
+        double kalman_adaptive_scale_{10.0};
+        double kalman_innovation_threshold_{0.02};
+        double kalman_adaptive_decay_{0.9}; // multiplicative decay per second (0..1)
+        bool kalman_reset_on_large_jump_{false};
+        double kalman_reset_threshold_{0.1};
+
         bool kalman_initialized_{false};
         double kalman_last_stamp_s_{0.0};
         Eigen::Vector3d kalman_pos_x_{Eigen::Vector3d::Zero()};
@@ -198,6 +206,8 @@ namespace axispose
             Eigen::Vector3d axis_v{Eigen::Vector3d::Zero()};
             std::array<Eigen::Matrix2d, 3> pos_P{};
             std::array<Eigen::Matrix2d, 3> axis_P{};
+            // Adaptive per-track Q scale used to temporarily increase responsiveness
+            double adaptive_q_scale{1.0};
         };
 
         std::unordered_map<uint32_t, TrackKalmanState> tracked_kalman_states_;

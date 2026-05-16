@@ -23,7 +23,7 @@ def generate_launch_description():
     default_rgb = os.path.join(pkg_directory, 'image_test', 'rgb')
     default_depth = os.path.join(pkg_directory, 'image_test', 'depth')
     default_engine = os.path.join(
-        pkg_directory, 'engine', 'realcool50.engine')
+        pkg_directory, 'engine', 'seemsbetter50.engine')
     default_statistic = os.path.join(
         pkg_directory, 'statistics')
 
